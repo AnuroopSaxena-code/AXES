@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AXES Sandbox Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- HEADER -->
+        <header class="app-header">
+            <div>
+                <div class="brand-title">
+                    <span>AXES</span>
+                    <span class="brand-badge">Adaptive Sandbox v0.3.0</span>
+                </div>
+                <div class="brand-subtitle">Adaptive eXecution Environment Sandbox (cgroups v2 Runtime)</div>
+            </div>
+            <div class="status-badge-group">
+                <div class="status-indicator">
+                    <span class="status-dot" id="system-status-dot"></span>
+                    <span id="system-status-text">Checking System...</span>
+                </div>
+                <div class="controllers-list" id="controllers-list">
+                    <span class="ctrl-pill">cgroup2</span>
+                    <span class="ctrl-pill">cpu</span>
+                    <span class="ctrl-pill">memory</span>
+                    <span class="ctrl-pill">pids</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- GRID: LAUNCHER & ACTIVE JOB -->
+        <div class="grid-2col">
+            <!-- JOB LAUNCHER CARD -->
+            <div class="card">
+                <div class="card-title">
+                    <span>Job Launcher</span>
+                    <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">OS Workload Execution</span>
+                </div>
+                <div class="preset-buttons">
+                    <button class="btn-preset" onclick="loadPreset('cpu')">⚡ CPU Burn Workload</button>
+                    <button class="btn-preset" onclick="loadPreset('mem')">💾 Memory Stress (256MB)</button>
+                    <button class="btn-preset" onclick="loadPreset('proc')">🧵 Process Stress (PID=15)</button>
+                    <button class="btn-preset" onclick="loadPreset('normal')">✅ Normal Workload</button>
+                </div>
+                <form id="launcher-form" onsubmit="handleRunJob(event)" class="form-grid">
+                    <div class="form-group full-width">
+                        <label for="cmd-input">Target Program & Arguments</label>
+                        <input type="text" id="cmd-input" value="python3 workloads/cpu_burn.py" required placeholder="python3 workloads/cpu_burn.py">
+                    </div>
+                    <div class="form-group">
+                        <label for="job-id-input">Job ID (Optional)</label>
+                        <input type="text" id="job-id-input" placeholder="Auto-generated (job-XXX)">
+                    </div>
+                    <div class="form-group">
+                        <label for="cpu-limit-input">Initial CPU Limit (%)</label>
+                        <input type="number" id="cpu-limit-input" value="200" step="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="mem-limit-input">Memory Limit (MB)</label>
+                        <input type="number" id="mem-limit-input" value="512" step="32">
+                    </div>
+                    <div class="form-group">
+                        <label for="pids-limit-input">PID Limit (Max Processes)</label>
+                        <input type="number" id="pids-limit-input" value="64">
+                    </div>
+                    <div class="form-group">
+                        <label for="threshold-input">Adaptive CPU Threshold (%)</label>
+                        <input type="number" id="threshold-input" value="100" step="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="consecutive-input">Consecutive Samples Required</label>
+                        <input type="number" id="consecutive-input" value="2" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="reduced-cpu-input">Reduced CPU Limit (%)</label>
+                        <input type="number" id="reduced-cpu-input" value="100" step="10">
+                    </div>
+                    <div class="form-group">
+                        <label for="interval-input">Sample Interval (sec)</label>
+                        <input type="number" id="interval-input" value="0.5" step="0.1">
+                    </div>
+                    <div class="form-group full-width" style="margin-top: 8px;">
+                        <button type="submit" class="btn-primary" id="btn-run">
+                            <span>▶ RUN JOB IN AXES SANDBOX</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- ACTIVE JOB CARD -->
+            <div class="card">
+                <div class="card-title">
+                    <span>Active Execution Monitor</span>
+                    <span id="active-job-id-badge" class="brand-badge">No Job Selected</span>
+                </div>
+                <div class="metrics-row">
+                    <div class="metric-card">
+                        <span class="metric-label">CPU USAGE</span>
+                        <span class="metric-value" id="val-cpu">0.0%</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">MEMORY USAGE</span>
+                        <span class="metric-value" id="val-mem" style="color: var(--accent-purple);">0.0 MB</span>
+                    </div>
+                    <div class="metric-card">
+                        <span class="metric-label">PROCESS COUNT</span>
+                        <span class="metric-value" id="val-pids" style="color: var(--accent-amber);">0</span>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <canvas id="resource-chart"></canvas>
+                </div>
+
+                <div style="font-size: 0.8rem; display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono);">
+                    <div><strong>PID:</strong> <span id="info-pid">N/A</span> | <strong>Status:</strong> <span id="info-status">IDLE</span> | <strong>Runtime:</strong> <span id="info-runtime">0.0 s</span></div>
+                    <div><strong>CGroup:</strong> <span id="info-cgroup">/sys/fs/cgroup/axes/none</span></div>
+                    <div><strong>PID Attached:</strong> <span id="info-attached" style="color: var(--accent-green);">YES (Verified)</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- GRID: ADAPTIVE POLICY & RAW RESOURCE LIMITS -->
+        <div class="grid-2col">
+            <!-- ADAPTIVE POLICY CARD -->
+            <div class="card">
+                <div class="card-title">
+                    <span>Adaptive Resource Policy</span>
+                    <span id="adaptive-badge" class="adaptive-status-badge normal">NORMAL</span>
+                </div>
+                <div class="adaptive-panel">
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; font-size: 0.85rem; font-family: var(--font-mono);">
+                        <div><strong>Initial CPU Limit:</strong> <span id="adapt-initial">200%</span></div>
+                        <div><strong>Current CPU Limit:</strong> <span id="adapt-current" style="color: var(--accent-blue);">200%</span></div>
+                        <div><strong>Trigger Threshold:</strong> <span id="adapt-threshold">> 100%</span></div>
+                        <div><strong>Consecutive Target:</strong> <span id="adapt-consecutive">2 samples</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RAW KERNEL RESOURCE LIMITS CARD -->
+            <div class="card">
+                <div class="card-title">
+                    <span>cgroups v2 Kernel Limits</span>
+                    <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">Linux Control Files</span>
+                </div>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Resource</th>
+                            <th>Configured Limit</th>
+                            <th>Raw cgroup v2 File</th>
+                            <th>Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>CPU Quota</td>
+                            <td id="limit-cpu-cfg">200%</td>
+                            <td><code>cpu.max</code></td>
+                            <td id="raw-cpu-max">200000 100000</td>
+                        </tr>
+                        <tr>
+                            <td>Memory Max</td>
+                            <td id="limit-mem-cfg">512 MB</td>
+                            <td><code>memory.max</code></td>
+                            <td id="raw-mem-max">536870912</td>
+                        </tr>
+                        <tr>
+                            <td>Memory Swap</td>
+                            <td>Disabled</td>
+                            <td><code>memory.swap.max</code></td>
+                            <td id="raw-swap-max">0</td>
+                        </tr>
+                        <tr>
+                            <td>Max Processes</td>
+                            <td id="limit-pids-cfg">64 PIDs</td>
+                            <td><code>pids.max</code></td>
+                            <td id="raw-pids-max">64</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- EVENT LOG TERMINAL -->
+        <div class="card">
+            <div class="card-title">
+                <span>Execution Timeline & Event Log</span>
+                <span style="font-size: 0.75rem; font-family: var(--font-mono); color: var(--text-muted);">Real-Time Event Stream</span>
+            </div>
+            <div class="terminal-window" id="event-terminal">
+                <div class="log-entry">[0.0s] AXES Sandbox initialized. Ready for job execution.</div>
+            </div>
+        </div>
+
+        <!-- JOB HISTORY TABLE -->
+        <div class="card">
+            <div class="card-title">
+                <span>Execution History & Reports</span>
+                <button class="btn-preset" onclick="fetchHistory()">🔄 Refresh History</button>
+            </div>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Job ID</th>
+                        <th>Command</th>
+                        <th>Status</th>
+                        <th>Runtime</th>
+                        <th>Peak CPU</th>
+                        <th>Peak Memory</th>
+                        <th>Peak PIDs</th>
+                        <th>Adaptive Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="history-table-body">
+                    <tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No execution history recorded yet.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- REPORT MODAL -->
+    <div class="modal-backdrop" id="report-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span style="font-weight: 700; font-size: 1.1rem; color: var(--text-heading);" id="modal-title">Job Execution Report</span>
+                <button class="btn-preset" onclick="closeModal()">✕ Close</button>
+            </div>
+            <div class="modal-body">
+                <pre class="report-text" id="modal-report-body">Loading report...</pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

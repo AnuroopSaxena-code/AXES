@@ -1,0 +1,31 @@
+# Build directory
+build/
+bin/
+out/
+
+# C/C++ compiled objects & binaries
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.a
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Temporary / Log files
+*.log

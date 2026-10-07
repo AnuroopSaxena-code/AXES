@@ -1,0 +1,59 @@
+==================================================
+AXES EXECUTION REPORT
+==================================================
+
+Job ID:             job-cpu-review
+Command:            python3 workloads/cpu_burn.py 
+Start time:         2026-10-06 02:54:35
+End time:           2026-10-06 02:54:47
+Runtime:            12.81 s
+Status:             EXITED
+Exit code / Signal: Code 0
+
+CGROUP
+Path:         /sys/fs/cgroup/axes/job-cpu-review
+PID Attached: YES
+
+RESOURCE LIMITS
+CPU:     200.00 %
+Memory:  512 MB
+Swap:    Disabled (0 MB)
+PIDs:    64
+
+PEAK USAGE
+CPU:       199.9 %
+Memory:    35.6 MB
+Processes: 5
+
+ADAPTIVE POLICY
+Initial CPU:         200.0 %
+Final CPU:           100.0 %
+Threshold:           100.0 %
+Consecutive Samples: 2
+Triggered:           TRIGGERED (Reduced)
+
+EVENT TIMELINE
+[0.0s] NORMAL
+[0.8s] High CPU detected (174.8% >= 100.0%) [1/2]
+[1.6s] High CPU detected (199.9% >= 100.0%) [2/2]
+[1.6s] ADAPTIVE TRIGGER: CPU limit changed: 200% -> 100% (cpu.max: 100000 100000)
+[2.4s] High CPU detected (104.1% >= 100.0%) [3/2]
+[3.2s] High CPU detected (100.1% >= 100.0%) [4/2]
+[4.0s] NORMAL
+[4.8s] NORMAL
+[5.6s] High CPU detected (100.1% >= 100.0%) [1/2]
+[6.4s] NORMAL
+[7.2s] High CPU detected (100.1% >= 100.0%) [1/2]
+[8.0s] High CPU detected (101.1% >= 100.0%) [2/2]
+[8.8s] NORMAL
+[9.6s] High CPU detected (100.1% >= 100.0%) [1/2]
+[10.4s] High CPU detected (100.1% >= 100.0%) [2/2]
+[11.2s] NORMAL
+[12.0s] High CPU detected (100.3% >= 100.0%) [1/2]
+
+RAW KERNEL VALUES
+cpu.max:         100000 100000
+memory.max:      536870912
+memory.swap.max: 0
+pids.max:        64
+==================================================
