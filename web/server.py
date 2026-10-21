@@ -11,7 +11,7 @@ import re
 import urllib.parse
 from pathlib import Path
 
-PORT = 8080
+PORT = int(os.environ.get("AXES_PORT", 8080))
 HOST = "127.0.0.1"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,10 +23,35 @@ WEB_DIR = BASE_DIR / "web"
 active_jobs = {} # job_id -> dict state
 job_lock = threading.Lock()
 
-def parse_report_file(filepath):
-    if not os.path.exists(filepath):
+VALID_JOB_ID_REGEX = re.compile(r'^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,63}$')
+
+def is_valid_job_id(job_id: str) -> bool:
+    if not job_id or not isinstance(job_id, str):
+        return False
+    return bool(VALID_JOB_ID_REGEX.match(job_id))
+
+def get_safe_report_path(job_id: str):
+    if not is_valid_job_id(job_id):
         return None
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    report_file = (REPORTS_DIR / f"{job_id}_report.txt").resolve()
+    reports_root = REPORTS_DIR.resolve()
+    try:
+        report_file.relative_to(reports_root)
+        return report_file
+    except ValueError:
+        return None
+
+def parse_report_file(filepath):
+    path_obj = Path(filepath).resolve()
+    reports_root = REPORTS_DIR.resolve()
+    try:
+        path_obj.relative_to(reports_root)
+    except ValueError:
+        return None
+    if not path_obj.exists() or not path_obj.is_file():
+        return None
+
+    with open(path_obj, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
     
     report_data = {
@@ -138,23 +163,8 @@ def parse_report_file(filepath):
 
 def run_job_thread(job_id, cmd_list, config):
     with job_lock:
-        active_jobs[job_id] = {
-            "job_id": job_id,
-            "config": config,
-            "status": "RUNNING",
-            "pid": None,
-            "cgroup_path": f"/sys/fs/cgroup/axes/{job_id}",
-            "pid_attached": "YES",
-            "runtime_sec": 0.0,
-            "metrics": {"cpu_pct": 0.0, "memory_mb": 0.0, "pids": 1},
-            "history": [],
-            "events": [f"[0.0s] AXES Sandbox job {job_id} launched."],
-            "initial_cpu_limit": config.get("cpu_limit", 200.0),
-            "current_cpu_limit": config.get("cpu_limit", 200.0),
-            "adaptive_triggered": False,
-            "exit_code": None,
-            "report_data": None
-        }
+        if job_id in active_jobs:
+            active_jobs[job_id]["status"] = "RUNNING"
 
     exec_cmd = [str(AXES_BIN), "run", "--job-id", job_id]
     exec_cmd.extend(["--cpu-limit", str(config.get("cpu_limit", 200.0))])
@@ -169,14 +179,21 @@ def run_job_thread(job_id, cmd_list, config):
     
     exec_cmd.extend(cmd_list)
 
-    proc = subprocess.Popen(
-        exec_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        cwd=str(BASE_DIR)
-    )
+    try:
+        proc = subprocess.Popen(
+            exec_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=str(BASE_DIR)
+        )
+    except Exception as exc:
+        with job_lock:
+            if job_id in active_jobs:
+                active_jobs[job_id]["status"] = "FAILED"
+                active_jobs[job_id]["events"].append(f"[0.0s] Failed to launch AXES supervisor: {str(exc)}")
+        return
 
     with job_lock:
         if job_id in active_jobs:
@@ -246,8 +263,8 @@ def run_job_thread(job_id, cmd_list, config):
             state["exit_code"] = proc.returncode
             state["status"] = "FINISHED" if proc.returncode == 0 else "TERMINATED"
             # Read generated report
-            report_file = REPORTS_DIR / f"{job_id}_report.txt"
-            if report_file.exists():
+            report_file = get_safe_report_path(job_id)
+            if report_file and report_file.exists():
                 parsed = parse_report_file(report_file)
                 if parsed:
                     state["report_data"] = parsed
@@ -256,15 +273,47 @@ def run_job_thread(job_id, cmd_list, config):
                         state["current_cpu_limit"] = parsed.get("final_cpu_limit", 100.0)
 
 class AxesHTTPHandler(http.server.SimpleHTTPRequestHandler):
+    @property
+    def allowed_hosts(self):
+        return {
+            f"127.0.0.1:{PORT}",
+            f"localhost:{PORT}",
+            "127.0.0.1:8080",
+            "localhost:8080",
+            "127.0.0.1",
+            "localhost"
+        }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
+
+    def _verify_origin_and_host(self) -> bool:
+        # Validate Host header if provided
+        host = self.headers.get("Host", "").strip()
+        if host and host not in self.allowed_hosts:
+            return False
+
+        # Validate Origin header if present
+        origin = self.headers.get("Origin")
+        if origin:
+            parsed = urllib.parse.urlparse(origin)
+            if parsed.netloc not in self.allowed_hosts:
+                return False
+
+        # Validate Sec-Fetch-Site if present
+        sec_fetch_site = self.headers.get("Sec-Fetch-Site")
+        if sec_fetch_site and sec_fetch_site not in ("same-origin", "none", "same-site"):
+            return False
+
+        return True
 
     def _send_json(self, data, status=200):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # Wildcard CORS explicitly removed to prevent cross-site execution attacks
         self.end_headers()
         self.wfile.write(body)
 
@@ -272,8 +321,12 @@ class AxesHTTPHandler(http.server.SimpleHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
+        if path.startswith("/api/"):
+            if not self._verify_origin_and_host():
+                self._send_json({"error": "Forbidden: Cross-origin or untrusted request blocked."}, status=403)
+                return
+
         if path == "/api/status":
-            # Check environment using ./axes check
             try:
                 res = subprocess.run([str(AXES_BIN), "check"], capture_output=True, text=True, timeout=5)
                 output = res.stdout
@@ -294,18 +347,25 @@ class AxesHTTPHandler(http.server.SimpleHTTPRequestHandler):
 
         elif path.startswith("/api/job/"):
             job_id = path.replace("/api/job/", "").strip()
+            if not is_valid_job_id(job_id):
+                self._send_json({"error": "Invalid job ID format"}, status=400)
+                return
+
             with job_lock:
                 state = active_jobs.get(job_id)
                 if state:
                     self._send_json(state)
-                else:
-                    # Check if report exists
-                    report_file = REPORTS_DIR / f"{job_id}_report.txt"
-                    if report_file.exists():
-                        parsed = parse_report_file(report_file)
-                        self._send_json({"job_id": job_id, "status": parsed["status"], "report_data": parsed})
-                    else:
-                        self._send_json({"error": "Job not found"}, status=404)
+                    return
+
+            # Check if report exists
+            report_file = get_safe_report_path(job_id)
+            if report_file and report_file.exists():
+                parsed = parse_report_file(report_file)
+                if parsed:
+                    self._send_json({"job_id": job_id, "status": parsed["status"], "report_data": parsed})
+                    return
+
+            self._send_json({"error": "Job not found"}, status=404)
             return
 
         elif path == "/api/history":
@@ -313,60 +373,171 @@ class AxesHTTPHandler(http.server.SimpleHTTPRequestHandler):
             if REPORTS_DIR.exists():
                 for f in os.listdir(REPORTS_DIR):
                     if f.endswith("_report.txt"):
-                        parsed = parse_report_file(REPORTS_DIR / f)
-                        if parsed:
-                            history_list.append(parsed)
+                        job_id_cand = f[:-len("_report.txt")]
+                        if is_valid_job_id(job_id_cand):
+                            parsed = parse_report_file(REPORTS_DIR / f)
+                            if parsed:
+                                history_list.append(parsed)
             history_list.sort(key=lambda x: x.get("start_time", ""), reverse=True)
             self._send_json(history_list)
             return
 
         elif path.startswith("/api/report/"):
             job_id = path.replace("/api/report/", "").strip()
-            report_file = REPORTS_DIR / f"{job_id}_report.txt"
-            if report_file.exists():
+            if not is_valid_job_id(job_id):
+                self._send_json({"error": "Invalid job ID format"}, status=400)
+                return
+
+            report_file = get_safe_report_path(job_id)
+            if report_file and report_file.exists():
                 parsed = parse_report_file(report_file)
-                self._send_json(parsed)
-            else:
-                self._send_json({"error": "Report not found"}, status=404)
+                if parsed:
+                    self._send_json(parsed)
+                    return
+
+            self._send_json({"error": "Report not found"}, status=404)
             return
 
         # Serve static web files
         return super().do_GET()
 
     def do_POST(self):
+        if not self._verify_origin_and_host():
+            self._send_json({"error": "Forbidden: Cross-origin or untrusted request blocked."}, status=403)
+            return
+
         if self.path == "/api/run":
-            length = int(self.headers.get("Content-Length", 0))
-            body_bytes = self.rfile.read(length)
+            # 1. Check Content-Length
             try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (ValueError, TypeError):
+                self._send_json({"error": "Invalid Content-Length header"}, status=400)
+                return
+
+            if length <= 0 or length > 65536:
+                self._send_json({"error": "Payload size invalid (must be between 1 and 65,536 bytes)"}, status=400)
+                return
+
+            # 2. Parse JSON body
+            try:
+                body_bytes = self.rfile.read(length)
                 data = json.loads(body_bytes.decode("utf-8"))
+                if not isinstance(data, dict):
+                    self._send_json({"error": "JSON body must be a JSON object"}, status=400)
+                    return
             except Exception as e:
-                self._send_json({"error": "Invalid JSON"}, status=400)
+                self._send_json({"error": f"Invalid JSON payload: {str(e)}"}, status=400)
                 return
 
-            raw_cmd = data.get("command", "").strip()
-            if not raw_cmd:
-                self._send_json({"error": "Command is required"}, status=400)
+            # 3. Validate command
+            raw_cmd = data.get("command")
+            if not raw_cmd or not isinstance(raw_cmd, str) or not raw_cmd.strip():
+                self._send_json({"error": "Command is required and must be a non-empty string"}, status=400)
+                return
+            raw_cmd = raw_cmd.strip()
+            if len(raw_cmd) > 4096 or "\0" in raw_cmd:
+                self._send_json({"error": "Command exceeds length limit or contains null characters"}, status=400)
                 return
 
-            # Split command string safely into args list
             import shlex
-            cmd_list = shlex.split(raw_cmd)
+            try:
+                cmd_list = shlex.split(raw_cmd)
+                if not cmd_list:
+                    self._send_json({"error": "Command is empty"}, status=400)
+                    return
+            except Exception as e:
+                self._send_json({"error": f"Failed to parse command arguments: {str(e)}"}, status=400)
+                return
 
-            now_ms = int(time.time() * 1000)
-            job_id = data.get("job_id", "").strip()
-            if not job_id:
-                job_id = f"job-{now_ms % 10000:04d}"
+            # 4. Validate job_id
+            raw_job_id = data.get("job_id", "")
+            if raw_job_id:
+                if not isinstance(raw_job_id, str) or not is_valid_job_id(raw_job_id.strip()):
+                    self._send_json({
+                        "error": f"Invalid job_id '{raw_job_id}'. Must be 1-64 characters matching [a-zA-Z0-9_-] and start with alphanumeric or underscore"
+                    }, status=400)
+                    return
+                job_id = raw_job_id.strip()
+            else:
+                now_us = int(time.time() * 1000000)
+                job_id = f"job-{now_us % 1000000:06d}-{os.getpid()}"
+
+            # 5. Validate numeric configuration parameters
+            try:
+                cpu_limit = float(data.get("cpu_limit", 200.0))
+                memory_limit = int(data.get("memory_limit", 512))
+                pids_limit = int(data.get("pids_limit", 64))
+                cpu_threshold = float(data.get("cpu_threshold", 150.0))
+                consecutive = int(data.get("consecutive", 3))
+                reduced_cpu = float(data.get("reduced_cpu", 100.0))
+                sample_interval = float(data.get("sample_interval", 0.5))
+                adaptive = bool(data.get("adaptive", True))
+
+                if not (1.0 <= cpu_limit <= 10000.0):
+                    raise ValueError("cpu_limit must be between 1.0% and 10000.0%")
+                if not (1 <= memory_limit <= 1048576):
+                    raise ValueError("memory_limit must be between 1 MB and 1,048,576 MB")
+                if not (1 <= pids_limit <= 4194304):
+                    raise ValueError("pids_limit must be between 1 and 4,194,304")
+                if not (1.0 <= cpu_threshold <= 10000.0):
+                    raise ValueError("cpu_threshold must be between 1.0% and 10000.0%")
+                if not (1 <= consecutive <= 1000):
+                    raise ValueError("consecutive must be between 1 and 1000")
+                if not (1.0 <= reduced_cpu <= 10000.0):
+                    raise ValueError("reduced_cpu must be between 1.0% and 10000.0%")
+                if not (0.05 <= sample_interval <= 3600.0):
+                    raise ValueError("sample_interval must be between 0.05s and 3600.0s")
+            except (ValueError, TypeError) as val_err:
+                self._send_json({"error": f"Invalid configuration parameter: {str(val_err)}"}, status=400)
+                return
 
             config = {
-                "cpu_limit": float(data.get("cpu_limit", 200.0)),
-                "memory_limit": int(data.get("memory_limit", 512)),
-                "pids_limit": int(data.get("pids_limit", 64)),
-                "cpu_threshold": float(data.get("cpu_threshold", 150.0)),
-                "consecutive": int(data.get("consecutive", 3)),
-                "reduced_cpu": float(data.get("reduced_cpu", 100.0)),
-                "sample_interval": float(data.get("sample_interval", 0.5)),
-                "adaptive": bool(data.get("adaptive", True))
+                "cpu_limit": cpu_limit,
+                "memory_limit": memory_limit,
+                "pids_limit": pids_limit,
+                "cpu_threshold": cpu_threshold,
+                "consecutive": consecutive,
+                "reduced_cpu": reduced_cpu,
+                "sample_interval": sample_interval,
+                "adaptive": adaptive
             }
+
+            # 6. Check for duplicate/running job_id collisions
+            with job_lock:
+                if job_id in active_jobs:
+                    current_status = active_jobs[job_id].get("status")
+                    if current_status in ("STARTING", "RUNNING"):
+                        self._send_json({"error": f"Job '{job_id}' is already running."}, status=409)
+                        return
+
+                cgroup_procs_check = Path(f"/sys/fs/cgroup/axes/{job_id}/cgroup.procs")
+                if cgroup_procs_check.exists():
+                    try:
+                        procs_text = cgroup_procs_check.read_text().strip()
+                        if procs_text:
+                            self._send_json({"error": f"Cgroup for job '{job_id}' is occupied by active processes."}, status=409)
+                            return
+                    except Exception:
+                        pass
+
+                # Reserve job slot
+                active_jobs[job_id] = {
+                    "job_id": job_id,
+                    "config": config,
+                    "status": "STARTING",
+                    "pid": None,
+                    "cgroup_path": f"/sys/fs/cgroup/axes/{job_id}",
+                    "pid_attached": "PENDING",
+                    "runtime_sec": 0.0,
+                    "metrics": {"cpu_pct": 0.0, "memory_mb": 0.0, "pids": 0},
+                    "history": [],
+                    "events": [f"[0.0s] AXES Sandbox job {job_id} scheduled."],
+                    "initial_cpu_limit": config["cpu_limit"],
+                    "current_cpu_limit": config["cpu_limit"],
+                    "adaptive_triggered": False,
+                    "exit_code": None,
+                    "report_data": None
+                }
 
             t = threading.Thread(target=run_job_thread, args=(job_id, cmd_list, config), daemon=True)
             t.start()
@@ -381,8 +552,8 @@ def main():
         print(f"[Server Warning] AXES binary not found at {AXES_BIN}. Build AXES first using 'cmake -B build && cmake --build build'.")
 
     os.chdir(str(WEB_DIR))
+    socketserver.TCPServer.allow_reuse_address = True
     server = socketserver.TCPServer((HOST, PORT), AxesHTTPHandler)
-    server.allow_reuse_address = True
     print(f"==================================================")
     print(f" AXES Web Dashboard Server Running")
     print(f" URL: http://{HOST}:{PORT}")

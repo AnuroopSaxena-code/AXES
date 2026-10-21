@@ -43,6 +43,10 @@ static std::string get_current_timestamp_str() {
 
 void ExecutionLauncher::write_execution_report(const ExecutionResult& result) {
     if (config_.report_dir.empty()) return;
+    if (!is_valid_job_id(config_.job_id)) {
+        std::cerr << "[AXES] Skipping report generation: invalid job ID '" << config_.job_id << "'" << std::endl;
+        return;
+    }
 
     std::error_code ec;
     fs::create_directories(config_.report_dir, ec);
@@ -121,6 +125,14 @@ ExecutionResult ExecutionLauncher::run() {
         return result;
     }
 
+    if (!is_valid_job_id(config_.job_id)) {
+        std::cerr << "\n[AXES FATAL ERROR] Invalid job ID '" << config_.job_id 
+                  << "'. Must be 1-64 characters matching [a-zA-Z0-9_-] and start with alphanumeric or underscore." << std::endl;
+        result.exit_code = 1;
+        result.cgroup_setup_failed = true;
+        return result;
+    }
+
     std::cout << "\nAXES Sandbox Launcher\n";
     std::cout << "----------------------------------------------\n";
     std::cout << "Job ID:        " << config_.job_id << "\n";
@@ -175,11 +187,15 @@ ExecutionResult ExecutionLauncher::run() {
         // Child Process
         close(sync_pipe[1]); // Close write end
         
-        // Wait for parent to attach PID to cgroup
-        char buf;
+        // Wait for parent to attach PID to cgroup and verify
+        char buf = 0;
         ssize_t n = read(sync_pipe[0], &buf, 1);
-        (void)n;
         close(sync_pipe[0]);
+
+        if (n != 1 || buf != 'G') {
+            std::cerr << "[AXES Child] Launch barrier aborted or sync failed. Exiting immediately without exec." << std::endl;
+            _exit(126);
+        }
 
         // Build argv array
         std::vector<char*> argv;
@@ -206,6 +222,8 @@ ExecutionResult ExecutionLauncher::run() {
         std::cerr << "\n[AXES FATAL ERROR] Failed to attach PID " << pid << " to cgroup.procs!" << std::endl;
         kill(pid, SIGKILL);
         close(sync_pipe[1]);
+        int status = 0;
+        waitpid(pid, &status, 0); // reap child
         cgroup.cleanup();
         result.exit_code = 1;
         result.cgroup_setup_failed = true;
@@ -214,10 +232,33 @@ ExecutionResult ExecutionLauncher::run() {
 
     // Verify PID presence in cgroup.procs
     result.process_attached_verified = cgroup.verify_process_attached(pid);
-    std::cout << "Cgroup PID:  " << (result.process_attached_verified ? "VERIFIED (Present in cgroup.procs)" : "WARNING (Pending)") << "\n";
+    if (!result.process_attached_verified) {
+        std::cerr << "\n[AXES FATAL ERROR] PID " << pid << " was NOT verified in cgroup.procs!" << std::endl;
+        std::cerr << "[AXES FATAL ERROR] Execution ABORTED. Target program was NOT launched." << std::endl;
+        kill(pid, SIGKILL);
+        close(sync_pipe[1]);
+        int status = 0;
+        waitpid(pid, &status, 0); // reap child
+        cgroup.cleanup();
+        result.exit_code = 1;
+        result.cgroup_setup_failed = true;
+        return result;
+    }
+
+    std::cout << "Cgroup PID:  VERIFIED (Present in cgroup.procs)\n";
 
     // Unblock child process to proceed with execvp
-    write(sync_pipe[1], "G", 1);
+    if (write(sync_pipe[1], "G", 1) != 1) {
+        std::cerr << "\n[AXES FATAL ERROR] Failed to write go-signal to sync pipe!" << std::endl;
+        kill(pid, SIGKILL);
+        close(sync_pipe[1]);
+        int status = 0;
+        waitpid(pid, &status, 0); // reap child
+        cgroup.cleanup();
+        result.exit_code = 1;
+        result.cgroup_setup_failed = true;
+        return result;
+    }
     close(sync_pipe[1]);
     std::cout << "Status:      RUNNING\n" << std::endl;
 

@@ -10,8 +10,29 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <cctype>
+#include <csignal>
+#include <thread>
+#include <chrono>
 
 namespace axes {
+
+bool is_valid_job_id(const std::string& job_id) {
+    if (job_id.empty() || job_id.length() > 64) {
+        return false;
+    }
+    // Must begin with an alphanumeric character or underscore
+    char first = job_id[0];
+    if (!std::isalnum(static_cast<unsigned char>(first)) && first != '_') {
+        return false;
+    }
+    for (char c : job_id) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
 
 namespace fs = std::filesystem;
 
@@ -56,6 +77,10 @@ std::string CGroupController::resolve_writable_base_path(const std::string& defa
 
 CGroupController::CGroupController(const std::string& job_id, const std::string& base_path)
     : job_id_(job_id), base_path_(base_path) {
+    if (!is_valid_job_id(job_id_)) {
+        cgroup_path_ = "";
+        return;
+    }
     std::string writable_axes = resolve_writable_base_path(base_path_);
     cgroup_path_ = (fs::path(writable_axes) / job_id_).string();
 }
@@ -117,6 +142,27 @@ void CGroupController::ensure_parent_controllers() {
 }
 
 bool CGroupController::init(double cpu_limit_pct, uint64_t memory_limit_mb, int64_t pids_limit) {
+    if (!is_valid_job_id(job_id_) || cgroup_path_.empty()) {
+        std::cerr << "[CGroup FATAL] Invalid job ID '" << job_id_ 
+                  << "'. Must be 1-64 characters matching [a-zA-Z0-9_-] and start with alphanumeric or underscore." << std::endl;
+        return false;
+    }
+
+    // Check for collision with an actively running job
+    if (fs::exists(cgroup_path_)) {
+        std::string existing_procs;
+        if (read_file("cgroup.procs", existing_procs)) {
+            std::istringstream iss(existing_procs);
+            pid_t existing_pid;
+            if (iss >> existing_pid) {
+                std::cerr << "[CGroup FATAL] Cgroup path '" << cgroup_path_ 
+                          << "' already exists and contains active processes. Collision with job ID '" 
+                          << job_id_ << "'!" << std::endl;
+                return false;
+            }
+        }
+    }
+
     ensure_parent_controllers();
 
     std::error_code ec;
@@ -255,25 +301,52 @@ std::string CGroupController::get_control_file(const std::string& filename) {
 void CGroupController::cleanup() {
     if (!initialized_ || cgroup_path_.empty()) return;
 
-    std::error_code ec;
     if (fs::exists(cgroup_path_)) {
-        // Move any remaining processes back to parent cgroup
-        std::string procs_content;
-        if (read_file("cgroup.procs", procs_content)) {
-            std::istringstream iss(procs_content);
-            pid_t p;
-            fs::path parent_procs = fs::path(cgroup_path_).parent_path() / "cgroup.procs";
-            std::ofstream p_ofs(parent_procs);
-            while (iss >> p) {
-                if (p_ofs.is_open()) {
-                    p_ofs << p << std::endl;
-                }
+        // 1. Attempt atomic cgroup.kill (Linux kernel >= 5.14)
+        fs::path kill_path = fs::path(cgroup_path_) / "cgroup.kill";
+        if (fs::exists(kill_path)) {
+            std::ofstream kfs(kill_path);
+            if (kfs.is_open()) {
+                kfs << "1" << std::endl;
+                kfs.flush();
             }
         }
 
-        fs::remove_all(cgroup_path_, ec);
-        if (ec) {
-            rmdir(cgroup_path_.c_str());
+        // 2. Fallback / guarantee: read cgroup.procs and send SIGKILL to all active PIDs
+        // Never migrate surviving untrusted descendants into an unrestricted parent!
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            std::string procs_content;
+            std::vector<pid_t> pids_to_kill;
+            if (read_file("cgroup.procs", procs_content)) {
+                std::istringstream iss(procs_content);
+                pid_t p;
+                while (iss >> p) {
+                    if (p > 1) { // Safety: never signal PID 0 or PID 1
+                        pids_to_kill.push_back(p);
+                    }
+                }
+            }
+
+            if (pids_to_kill.empty()) {
+                break;
+            }
+
+            for (pid_t p : pids_to_kill) {
+                kill(p, SIGKILL);
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        // 3. Remove the cgroup directory with retries to allow kernel cleanup
+        for (int rmdir_attempt = 0; rmdir_attempt < 5; ++rmdir_attempt) {
+            if (rmdir(cgroup_path_.c_str()) == 0) {
+                break;
+            }
+            if (errno == ENOENT) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
     initialized_ = false;

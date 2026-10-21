@@ -23,6 +23,10 @@ struct EnvironmentCheckResult {
     }
 };
 
+// Validates that job_id is 1-64 characters, starts with alphanumeric or '_',
+// contains only [a-zA-Z0-9_-], and contains no directory separators or traversal characters.
+bool is_valid_job_id(const std::string& job_id);
+
 class CGroupController {
 public:
     CGroupController(const std::string& job_id, 

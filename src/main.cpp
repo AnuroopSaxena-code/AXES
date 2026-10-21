@@ -63,6 +63,106 @@ int do_check() {
     }
 }
 
+#include <cmath>
+#include <cstdlib>
+#include <cerrno>
+#include <cctype>
+#include <unistd.h>
+
+static bool safe_parse_double(const std::string& str, double& out, double min_val, double max_val, const std::string& opt_name) {
+    if (str.empty()) {
+        std::cerr << "[AXES Error] Option " << opt_name << " has empty value.\n";
+        return false;
+    }
+    char* endptr = nullptr;
+    errno = 0;
+    double val = std::strtod(str.c_str(), &endptr);
+    if (errno == ERANGE) {
+        std::cerr << "[AXES Error] Value out of range for " << opt_name << ": '" << str << "'.\n";
+        return false;
+    }
+    if (endptr == str.c_str() || *endptr != '\0') {
+        std::cerr << "[AXES Error] Invalid numeric value for " << opt_name << ": '" << str << "'. Expected a valid number.\n";
+        return false;
+    }
+    if (std::isnan(val) || std::isinf(val)) {
+        std::cerr << "[AXES Error] Value for " << opt_name << " must be a finite number.\n";
+        return false;
+    }
+    if (val < min_val || val > max_val) {
+        std::cerr << "[AXES Error] Value for " << opt_name << " (" << val 
+                  << ") is outside acceptable range [" << min_val << ", " << max_val << "].\n";
+        return false;
+    }
+    out = val;
+    return true;
+}
+
+static bool safe_parse_uint64(const std::string& str, uint64_t& out, uint64_t min_val, uint64_t max_val, const std::string& opt_name) {
+    if (str.empty()) {
+        std::cerr << "[AXES Error] Option " << opt_name << " has empty value.\n";
+        return false;
+    }
+    for (char c : str) {
+        if (c == '-') {
+            std::cerr << "[AXES Error] Negative value not allowed for " << opt_name << ": '" << str << "'.\n";
+            return false;
+        }
+    }
+    char* endptr = nullptr;
+    errno = 0;
+    unsigned long long val = std::strtoull(str.c_str(), &endptr, 10);
+    if (errno == ERANGE) {
+        std::cerr << "[AXES Error] Value out of range for " << opt_name << ": '" << str << "'.\n";
+        return false;
+    }
+    if (endptr == str.c_str() || *endptr != '\0') {
+        std::cerr << "[AXES Error] Invalid integer value for " << opt_name << ": '" << str << "'. Expected an integer.\n";
+        return false;
+    }
+    if (val < min_val || val > max_val) {
+        std::cerr << "[AXES Error] Value for " << opt_name << " (" << val 
+                  << ") is outside acceptable range [" << min_val << ", " << max_val << "].\n";
+        return false;
+    }
+    out = static_cast<uint64_t>(val);
+    return true;
+}
+
+static bool safe_parse_int64(const std::string& str, int64_t& out, int64_t min_val, int64_t max_val, const std::string& opt_name) {
+    if (str.empty()) {
+        std::cerr << "[AXES Error] Option " << opt_name << " has empty value.\n";
+        return false;
+    }
+    char* endptr = nullptr;
+    errno = 0;
+    long long val = std::strtoll(str.c_str(), &endptr, 10);
+    if (errno == ERANGE) {
+        std::cerr << "[AXES Error] Value out of range for " << opt_name << ": '" << str << "'.\n";
+        return false;
+    }
+    if (endptr == str.c_str() || *endptr != '\0') {
+        std::cerr << "[AXES Error] Invalid integer value for " << opt_name << ": '" << str << "'. Expected an integer.\n";
+        return false;
+    }
+    if (val < min_val || val > max_val) {
+        std::cerr << "[AXES Error] Value for " << opt_name << " (" << val 
+                  << ") is outside acceptable range [" << min_val << ", " << max_val << "].\n";
+        return false;
+    }
+    out = static_cast<int64_t>(val);
+    return true;
+}
+
+static bool safe_parse_int(const std::string& str, int& out, int min_val, int max_val, const std::string& opt_name) {
+    int64_t val64 = 0;
+    if (!safe_parse_int64(str, val64, min_val, max_val, opt_name)) {
+        return false;
+    }
+    out = static_cast<int>(val64);
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_help(argv[0]);
@@ -86,12 +186,7 @@ int main(int argc, char* argv[]) {
     }
 
     axes::Config config;
-    
-    // Auto-generate job ID if not explicitly specified
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-    config.job_id = "job-" + std::to_string(now_ms % 10000);
+    std::string explicit_job_id;
 
     int i = 2;
     while (i < argc) {
@@ -99,32 +194,94 @@ int main(int argc, char* argv[]) {
         if (arg == "--help" || arg == "-h") {
             print_help(argv[0]);
             return 0;
-        } else if (arg == "--job-id" && i + 1 < argc) {
-            config.job_id = argv[++i];
-        } else if (arg == "--cpu-limit" && i + 1 < argc) {
-            config.initial_cpu_limit_pct = std::stod(argv[++i]);
-        } else if (arg == "--memory-limit" && i + 1 < argc) {
-            config.memory_limit_mb = std::stoull(argv[++i]);
-        } else if (arg == "--pids-limit" && i + 1 < argc) {
-            config.pids_limit = std::stoll(argv[++i]);
-        } else if (arg == "--cpu-threshold" && i + 1 < argc) {
-            config.cpu_threshold_pct = std::stod(argv[++i]);
-        } else if (arg == "--consecutive" && i + 1 < argc) {
-            config.consecutive_samples_required = std::stoi(argv[++i]);
-        } else if (arg == "--reduced-cpu" && i + 1 < argc) {
-            config.reduced_cpu_limit_pct = std::stod(argv[++i]);
-        } else if (arg == "--sample-interval" && i + 1 < argc) {
-            config.sample_interval_sec = std::stod(argv[++i]);
+        } else if (arg == "--job-id") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --job-id requires a value.\n";
+                return 1;
+            }
+            std::string jid = argv[++i];
+            if (!axes::is_valid_job_id(jid)) {
+                std::cerr << "[AXES Error] Invalid job ID '" << jid 
+                          << "'. Must be 1-64 characters matching [a-zA-Z0-9_-] and start with alphanumeric or underscore.\n";
+                return 1;
+            }
+            explicit_job_id = jid;
+        } else if (arg == "--cpu-limit") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --cpu-limit requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_double(argv[++i], config.initial_cpu_limit_pct, 1.0, 10000.0, "--cpu-limit")) {
+                return 1;
+            }
+        } else if (arg == "--memory-limit") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --memory-limit requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_uint64(argv[++i], config.memory_limit_mb, 1, 1048576, "--memory-limit")) {
+                return 1;
+            }
+        } else if (arg == "--pids-limit") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --pids-limit requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_int64(argv[++i], config.pids_limit, 1, 4194304, "--pids-limit")) {
+                return 1;
+            }
+        } else if (arg == "--cpu-threshold") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --cpu-threshold requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_double(argv[++i], config.cpu_threshold_pct, 1.0, 10000.0, "--cpu-threshold")) {
+                return 1;
+            }
+        } else if (arg == "--consecutive") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --consecutive requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_int(argv[++i], config.consecutive_samples_required, 1, 1000, "--consecutive")) {
+                return 1;
+            }
+        } else if (arg == "--reduced-cpu") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --reduced-cpu requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_double(argv[++i], config.reduced_cpu_limit_pct, 1.0, 10000.0, "--reduced-cpu")) {
+                return 1;
+            }
+        } else if (arg == "--sample-interval") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --sample-interval requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_double(argv[++i], config.sample_interval_sec, 0.05, 3600.0, "--sample-interval")) {
+                return 1;
+            }
         } else if (arg == "--no-adaptive") {
             config.adaptive_enabled = false;
-        } else if (arg.rfind("--", 0) == 0) {
+        } else if (arg.rfind("--", 0) == 0 || (arg.rfind("-", 0) == 0 && arg.length() > 1 && !std::isdigit(static_cast<unsigned char>(arg[1])))) {
             std::cerr << "[AXES Error] Unknown option: " << arg << "\n";
+            print_help(argv[0]);
             return 1;
         } else {
             // Reached start of command and its arguments
             break;
         }
         i++;
+    }
+
+    if (!explicit_job_id.empty()) {
+        config.job_id = explicit_job_id;
+    } else {
+        auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        config.job_id = "job-" + std::to_string(now_us % 1000000) + "-" + std::to_string(getpid());
     }
 
     while (i < argc) {

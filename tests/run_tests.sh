@@ -32,6 +32,9 @@ fi
 echo -e "\n[Step 3] Running Strict C++ Unit Test Suite..."
 ./build/test_axes
 
+echo -e "\n[Step 3b] Running Phase 1 Security, CLI & API Automated Verification Suite..."
+python3 tests/test_phase1.py
+
 echo -e "\n[Step 4] Verification Test 1: Normal Workload Execution"
 echo "Command: ./build/axes run --job-id job-normal-01 python3 workloads/normal_workload.py"
 ./build/axes run --job-id job-normal-01 python3 workloads/normal_workload.py
