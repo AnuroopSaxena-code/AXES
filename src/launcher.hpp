@@ -13,6 +13,8 @@ namespace axes {
 struct Config {
     std::string job_id;
     std::vector<std::string> command;
+    std::string isolation{"resource"}; // Legacy trusted-workload mode; isolated requires Bubblewrap + seccomp.
+    std::string workspace{"staging"};
     
     // Resource limits
     double initial_cpu_limit_pct{200.0};
@@ -29,6 +31,11 @@ struct Config {
     double sample_interval_sec{1.0};
     bool verbose_logging{true};
     std::string report_dir{"reports"};
+
+    // Execution lifecycle & output capture options
+    double timeout_sec{0.0};                      // Wall-clock timeout in seconds (0 = disabled)
+    std::string output_file;                      // Output file path for child stdout/stderr
+    uint64_t max_output_bytes{10 * 1024 * 1024};  // Maximum output bytes captured (default: 10MB)
 };
 
 struct ExecutionResult {
@@ -57,6 +64,14 @@ struct ExecutionResult {
     std::string pids_max_evidence;
 
     std::vector<std::string> event_log;
+
+    // Execution status & output metrics
+    bool timed_out{false};
+    bool cancelled{false};
+    std::string final_status{"UNKNOWN"}; // "COMPLETED", "KILLED", "TIMED_OUT", "CANCELLED", "FAILED"
+    std::string output_file;
+    uint64_t output_bytes_captured{0};
+    bool output_truncated{false};
 };
 
 class ExecutionLauncher {

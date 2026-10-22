@@ -148,32 +148,26 @@ bool CGroupController::init(double cpu_limit_pct, uint64_t memory_limit_mb, int6
         return false;
     }
 
-    // Check for collision with an actively running job
-    if (fs::exists(cgroup_path_)) {
-        std::string existing_procs;
-        if (read_file("cgroup.procs", existing_procs)) {
-            std::istringstream iss(existing_procs);
-            pid_t existing_pid;
-            if (iss >> existing_pid) {
-                std::cerr << "[CGroup FATAL] Cgroup path '" << cgroup_path_ 
-                          << "' already exists and contains active processes. Collision with job ID '" 
-                          << job_id_ << "'!" << std::endl;
-                return false;
-            }
-        }
-    }
+    if (!std::isfinite(cpu_limit_pct) || cpu_limit_pct < 1 || cpu_limit_pct > 10000 ||
+        memory_limit_mb < 1 || memory_limit_mb > 1048576 || pids_limit < 1 || pids_limit > 4194304) return false;
 
+    // Never reuse a directory owned by another invocation, even while it is empty.
+    if (fs::exists(cgroup_path_)) {
+        std::cerr << "[CGroup FATAL] Job cgroup already exists; use a unique job ID.\n";
+        return false;
+    }
     ensure_parent_controllers();
 
     std::error_code ec;
-    fs::create_directories(cgroup_path_, ec);
-    if (ec) {
+    bool created = fs::create_directory(cgroup_path_, ec);
+    if (ec || !created) {
         std::cerr << "[CGroup FATAL] Failed to create cgroup directory '" << cgroup_path_ 
                   << "': " << ec.message() << std::endl;
         std::cerr << "[CGroup FATAL] Reason: Permission denied or missing cgroup delegation. Run 'sudo ./scripts/setup_cgroups.sh' first!" << std::endl;
         return false;
     }
 
+    initialized_ = true; // Own this directory now; rollback also cleans partial setup.
     current_cpu_limit_ = cpu_limit_pct;
 
     // Set CPU Limit
@@ -191,7 +185,9 @@ bool CGroupController::init(double cpu_limit_pct, uint64_t memory_limit_mb, int6
         return false;
     }
     // Disable swap to enforce strict memory ceiling
-    write_file("memory.swap.max", "0");
+    if (!write_file("memory.swap.max", "0") || get_control_file("memory.swap.max") != "0") {
+        cleanup(); return false;
+    }
 
     // Set PIDs Limit
     std::string pids_str = (pids_limit > 0) ? std::to_string(pids_limit) : "max";
@@ -230,14 +226,14 @@ bool CGroupController::verify_process_attached(pid_t pid) {
 }
 
 bool CGroupController::update_cpu_limit(double cpu_limit_pct) {
-    if (cpu_limit_pct <= 0) return false;
+    if (!std::isfinite(cpu_limit_pct) || cpu_limit_pct < 1 || cpu_limit_pct > 10000) return false;
 
     // Period is 100ms (100,000 us)
     const uint64_t period_usec = 100000;
     uint64_t quota_usec = static_cast<uint64_t>(std::round((cpu_limit_pct / 100.0) * period_usec));
     
     std::string val = std::to_string(quota_usec) + " " + std::to_string(period_usec);
-    if (write_file("cpu.max", val)) {
+    if (write_file("cpu.max", val) && get_control_file("cpu.max") == val) {
         current_cpu_limit_ = cpu_limit_pct;
         return true;
     }
@@ -253,7 +249,8 @@ bool CGroupController::get_stats(uint64_t& cpu_usage_usec, uint64_t& memory_byte
 
     // Read CPU usage from cpu.stat
     std::string cpu_stat_content;
-    if (read_file("cpu.stat", cpu_stat_content)) {
+    bool valid = read_file("cpu.stat", cpu_stat_content);
+    if (valid) {
         std::istringstream iss(cpu_stat_content);
         std::string key;
         uint64_t val;
@@ -267,25 +264,29 @@ bool CGroupController::get_stats(uint64_t& cpu_usage_usec, uint64_t& memory_byte
 
     // Read Memory usage from memory.current
     std::string mem_content;
-    if (read_file("memory.current", mem_content)) {
+    bool memory_ok = read_file("memory.current", mem_content);
+    valid = valid && memory_ok;
+    if (memory_ok) {
         try {
             memory_bytes = std::stoull(mem_content);
         } catch (...) {
-            memory_bytes = 0;
+            memory_bytes = 0; valid = false;
         }
     }
 
     // Read Process count from pids.current
     std::string pids_content;
-    if (read_file("pids.current", pids_content)) {
+    bool pids_ok = read_file("pids.current", pids_content);
+    valid = valid && pids_ok;
+    if (pids_ok) {
         try {
             pids_count = std::stoll(pids_content);
         } catch (...) {
-            pids_count = 0;
+            pids_count = 0; valid = false;
         }
     }
 
-    return true;
+    return valid;
 }
 
 std::string CGroupController::get_control_file(const std::string& filename) {

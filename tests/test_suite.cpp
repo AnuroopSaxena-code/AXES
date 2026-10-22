@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <unistd.h>
+#include <sys/wait.h>
 
 namespace fs = std::filesystem;
 
@@ -102,14 +103,21 @@ void test_monitor_sampling() {
         return;
     }
 
-    bool add_ok = cgroup.add_process(0);
+    pid_t child_pid = fork();
+    if (child_pid == 0) {
+        // Child process sleeps briefly
+        sleep(2);
+        _exit(0);
+    }
+
+    bool add_ok = cgroup.add_process(child_pid);
     assert(add_ok);
 
-    bool verify_ok = cgroup.verify_process_attached(getpid());
+    bool verify_ok = cgroup.verify_process_attached(child_pid);
     std::cout << "  PID Attached to cgroup.procs: " << (verify_ok ? "YES" : "NO") << std::endl;
     assert(verify_ok);
 
-    axes::Monitor monitor("test-job-002", getpid());
+    axes::Monitor monitor("test-job-002", child_pid);
     monitor.sample(cgroup);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     auto m2 = monitor.sample(cgroup);
@@ -119,11 +127,13 @@ void test_monitor_sampling() {
     std::cout << "  Sampled Runtime: " << m2.runtime_seconds << "s, Memory: " << m2.memory_usage_mb << " MB\n";
 
     cgroup.cleanup();
+    int status = 0;
+    waitpid(child_pid, &status, 0);
     std::cout << "  Monitor sampling passed!\n" << std::endl;
 }
 
 void test_normal_launcher_run() {
-    std::cout << "[Test 5] Testing ExecutionLauncher Normal Run..." << std::endl;
+    std::cout << "[Test 5] Testing ExecutionLauncher Normal Run & Output Capture..." << std::endl;
     axes::Config config;
     config.job_id = "test-job-normal";
     config.command = {"echo", "AXES Sandbox Test Success"};
@@ -140,9 +150,37 @@ void test_normal_launcher_run() {
     assert(res.process_attached_verified);
     assert(res.exit_code == 0);
     assert(!res.terminated_by_signal);
+    assert(res.final_status == "COMPLETED");
+    assert(res.output_bytes_captured > 0);
     std::cout << "  Normal launcher run exit code: " << res.exit_code << "\n";
-    std::cout << "  CGroup Evidence Path: " << res.cgroup_path << "\n";
+    std::cout << "  Output bytes captured: " << res.output_bytes_captured << "\n";
     std::cout << "  Normal launcher run passed!\n" << std::endl;
+}
+
+void test_launcher_timeout() {
+    std::cout << "[Test 6] Testing ExecutionLauncher Wall-Clock Timeout..." << std::endl;
+    axes::Config config;
+    config.job_id = "test-job-timeout";
+    config.command = {"sleep", "5"};
+    config.timeout_sec = 0.5;
+    config.verbose_logging = false;
+
+    auto t0 = std::chrono::steady_clock::now();
+    axes::ExecutionLauncher launcher(config);
+    axes::ExecutionResult res = launcher.run();
+    auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    if (res.cgroup_setup_failed) {
+        std::cerr << "[TEST SKIPPED] Subtree delegation required for timeout execution." << std::endl;
+        return;
+    }
+
+    assert(res.timed_out);
+    assert(res.exit_code == 124);
+    assert(res.final_status == "TIMED_OUT");
+    assert(elapsed < 2.0);
+    std::cout << "  Timeout elapsed: " << elapsed << "s (limit 0.5s), exit code: " << res.exit_code << "\n";
+    std::cout << "  Launcher timeout test passed!\n" << std::endl;
 }
 
 int main() {
@@ -162,6 +200,7 @@ int main() {
         test_cgroup_lifecycle();
         test_monitor_sampling();
         test_normal_launcher_run();
+        test_launcher_timeout();
     }
 
     std::cout << "========================================\n";

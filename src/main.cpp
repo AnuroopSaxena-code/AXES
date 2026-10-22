@@ -13,9 +13,11 @@ void print_help(const char* prog_name) {
     std::cout << "  " << prog_name << " run [options] <program> [args...]\n";
     std::cout << "  " << prog_name << " check\n\n";
     std::cout << "Commands:\n";
-    std::cout << "  run                     Execute target program inside isolated sandbox\n";
+    std::cout << "  run                     Execute with resource controls; select isolated mode for isolation\n";
     std::cout << "  check                   Verify Linux cgroups v2 environment & subtree permissions\n\n";
     std::cout << "Options for 'run':\n";
+    std::cout << "  --isolation <mode>      resource (trusted workloads only) or isolated (namespaces + seccomp)\n";
+    std::cout << "  --workspace <path>      Read-only workspace mounted at /workspace in isolated mode\n";
     std::cout << "  --job-id <id>           Unique identifier for execution job (default: job-XXX)\n";
     std::cout << "  --cpu-limit <pct>       Initial CPU limit percentage (default: 200%)\n";
     std::cout << "  --memory-limit <mb>     Memory limit in MB (default: 512 MB)\n";
@@ -24,12 +26,16 @@ void print_help(const char* prog_name) {
     std::cout << "  --consecutive <n>       Consecutive samples above threshold to adapt (default: 3)\n";
     std::cout << "  --reduced-cpu <pct>     CPU % limit after adaptation (default: 100%)\n";
     std::cout << "  --sample-interval <sec> Monitoring sampling interval in seconds (default: 1.0s)\n";
+    std::cout << "  --timeout <sec>         Wall-clock execution timeout in seconds (default: disabled)\n";
+    std::cout << "  --output-file <path>    File to save child process stdout/stderr (default: reports/<job_id>_output.log)\n";
+    std::cout << "  --max-output <mb>       Max output bytes retained in MB (default: 10 MB)\n";
     std::cout << "  --no-adaptive           Disable adaptive CPU limit adjustments\n";
     std::cout << "  --help                  Show this help message\n\n";
     std::cout << "Examples:\n";
     std::cout << "  " << prog_name << " check\n";
     std::cout << "  " << prog_name << " run python3 workloads/cpu_burn.py\n";
     std::cout << "  " << prog_name << " run --job-id job-001 --cpu-limit 200 --memory-limit 256 python3 workloads/memory_stress.py\n";
+    std::cout << "  " << prog_name << " run --timeout 5.0 --output-file reports/out.log ./staged/workload.bin\n";
 }
 
 int do_check() {
@@ -191,9 +197,17 @@ int main(int argc, char* argv[]) {
     int i = 2;
     while (i < argc) {
         std::string arg = argv[i];
+        if (arg == "--") { ++i; break; }
         if (arg == "--help" || arg == "-h") {
             print_help(argv[0]);
             return 0;
+        } else if (arg == "--isolation" || arg == "--workspace") {
+            if (i + 1 >= argc) { std::cerr << arg << " requires a value\n"; return 1; }
+            std::string value = argv[++i];
+            if (arg == "--isolation") {
+                if (value != "resource" && value != "isolated") { std::cerr << "Invalid isolation mode\n"; return 1; }
+                config.isolation = value;
+            } else { config.workspace = value; }
         } else if (arg == "--job-id") {
             if (i + 1 >= argc) {
                 std::cerr << "[AXES Error] Option --job-id requires a value.\n";
@@ -262,6 +276,39 @@ int main(int argc, char* argv[]) {
             if (!safe_parse_double(argv[++i], config.sample_interval_sec, 0.05, 3600.0, "--sample-interval")) {
                 return 1;
             }
+        } else if (arg == "--timeout") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --timeout requires a value.\n";
+                return 1;
+            }
+            if (!safe_parse_double(argv[++i], config.timeout_sec, 0.01, 86400.0, "--timeout")) {
+                return 1;
+            }
+        } else if (arg == "--output-file") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --output-file requires a value.\n";
+                return 1;
+            }
+            std::string out_path = argv[++i];
+            if (out_path.empty()) {
+                std::cerr << "[AXES Error] Option --output-file cannot be empty.\n";
+                return 1;
+            }
+            if (out_path.find('\0') != std::string::npos) {
+                std::cerr << "[AXES Error] Option --output-file contains null byte.\n";
+                return 1;
+            }
+            config.output_file = out_path;
+        } else if (arg == "--max-output") {
+            if (i + 1 >= argc) {
+                std::cerr << "[AXES Error] Option --max-output requires a value.\n";
+                return 1;
+            }
+            uint64_t max_mb = 10;
+            if (!safe_parse_uint64(argv[++i], max_mb, 1, 1024, "--max-output")) {
+                return 1;
+            }
+            config.max_output_bytes = max_mb * 1024ULL * 1024ULL;
         } else if (arg == "--no-adaptive") {
             config.adaptive_enabled = false;
         } else if (arg.rfind("--", 0) == 0 || (arg.rfind("-", 0) == 0 && arg.length() > 1 && !std::isdigit(static_cast<unsigned char>(arg[1])))) {
@@ -301,5 +348,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    return (result.exit_code >= 0 && result.exit_code != 127) ? result.exit_code : 1;
+    if (result.timed_out) {
+        return 124;
+    }
+
+    if (result.cancelled || result.terminated_by_signal) {
+        return 128 + result.signal_number;
+    }
+
+    return (result.exit_code >= 0) ? result.exit_code : 1;
 }

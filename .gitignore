@@ -29,3 +29,12 @@ env/
 
 # Temporary / Log files
 *.log
+
+# Runtime and Test Output
+reports/*
+!reports/.gitkeep
+!reports/job-cpu-review_report.txt
+
+# Staging area for user workloads
+staging/*
+!staging/.gitkeep

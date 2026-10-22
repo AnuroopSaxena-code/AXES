@@ -9,6 +9,7 @@
 namespace axes {
 
 struct ProcessMetrics {
+    bool valid{false};
     double cpu_usage_pct{0.0};
     double memory_usage_mb{0.0};
     int64_t process_count{0};
@@ -41,7 +42,7 @@ private:
 
     std::vector<ProcessMetrics> history_;
 
-    ProcessMetrics sample_fallback_proc(pid_t pid, double runtime_sec);
+
 };
 
 } // namespace axes

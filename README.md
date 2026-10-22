@@ -3,56 +3,67 @@
 [![Language](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20WSL2-orange.svg)](https://www.kernel.org/)
 [![Kernel](https://img.shields.io/badge/cgroups-v2-green.svg)](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
-[![Web GUI](https://img.shields.io/badge/Dashboard-Python%20%7C%20REST-brightgreen.svg)](http://127.0.0.1:8080)
+[![Security](https://img.shields.io/badge/Isolation-Namespaces%20%2B%20Seccomp--BPF-red.svg)](docs/THREAT_MODEL.md)
+[![Workbench](https://img.shields.io/badge/Workbench-Developer%20GUI-brightgreen.svg)](http://127.0.0.1:8080)
 
-AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead Linux execution supervisor designed to safely execute untrusted programs and autonomous workloads. AXES leverages **Linux cgroups v2** to strictly monitor resource consumption, enforce isolation ceilings, and dynamically adapt execution parameters (such as CPU throttling) in real time.
+AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead Linux execution supervisor and developer workbench designed to safely execute untrusted programs, benchmarks, and autonomous workloads. AXES combines **Linux cgroups v2**, **Linux namespaces (PID, Mount, Net, IPC, UTS, Cgroup)**, and **Seccomp-BPF syscall filtering** to enforce strict resource bounds and defense-in-depth isolation with a strict **fail-closed guarantee (no host fallback)**.
 
 ---
 
-## 📸 Overview & Architecture
+## 📸 Architecture & Defense-in-Depth Model
 
 ```text
                                   +-----------------------+
-                                  |   Web Dashboard GUI   |
+                                  |  Developer Workbench  |
                                   |  (http://127.0.0.1)   |
                                   +-----------+-----------+
-                                              | REST API
+                                              | REST API (localhost only)
                                               v
 +------------------+   CLI / REST    +-----------------------+
-| User / Workload  | --------------> |  AXES Engine (C++17)  |
+| Staged Workload  | --------------> |  AXES Supervisor C++  |
 +------------------+                 +-----------+-----------+
-                                                 |
-         +---------------------------------------+---------------------------------------+
-         |                                       |                                       |
-         v                                       v                                       v
-+------------------+                   +------------------+                   +------------------+
-| cgroups v2 Ctrl  |                   | Monitor Engine   |                   | Process Lifecycle|
-| /sys/fs/cgroup/  |                   | /proc & cgroups  |                   | fork() & execvp()|
-| cpu, memory, pids|                   | periodic metrics |                   | sync pipes       |
-+------------------+                   +------------------+                   +------------------+
+                                                  |
+         +----------------------------------------+----------------------------------------+
+         |                                        |                                        |
+         v                                        v                                        v
++-----------------------+                +-----------------------+                +-----------------------+
+|   cgroups v2 Engine   |                |   Monitor & Policy    |                | Isolated Child Sandbox|
+| /sys/fs/cgroup/axes/  |                | Real-time sampling    |                | Bubblewrap (bwrap)    |
+| - cpu.max (quota)     |                | Two-way CPU policy    |                | - PID/MNT/NET/IPC/UTS |
+| - memory.max (ceiling)|                | Consecutive threshold |                | - Read-only /workspace|
+| - memory.swap.max = 0 |                | One-way hysteresis    |                | - Ephemeral /tmp tmpfs|
+| - pids.max (limits)   |                | Subreaper cleanup     |                | - Cap-drop ALL        |
+| - cgroup.kill (atomic)|                | JSON / text reports   |                | - Seccomp-BPF allowlist|
++-----------------------+                +-----------------------+                +-----------------------+
 ```
 
-### Key Features
+### Key Capabilities
 
-1. **Process Lifecycle Tracking & Synchronization**
-   - Precise process execution using POSIX `fork()` and `execvp()`.
-   - Inter-process pipe synchronization ensuring cgroup limits and PID attachments are active before execution begins.
+1. **Defense-in-Depth Isolation (`--isolation isolated`)**
+   - **Linux Namespaces:** Virtualizes PID, Mount, Network, IPC, UTS, and Cgroup hierarchies via Bubblewrap.
+   - **Filesystem Virtualization:** Staged workspace is mounted read-only at `/workspace` (writes return `EROFS`). Ephemeral scratch space at `/tmp` backed by isolated `tmpfs`. Host roots (e.g. `/mnt/c`, `/sys/fs/cgroup`) are unmapped.
+   - **Network Block:** Workload runs with loopback only; network sockets and connections return `EPERM` or `ENETUNREACH`.
+   - **Privilege Stripping:** `PR_SET_NO_NEW_PRIVS` prevents setuid transitions; `cap-drop ALL` strips all Linux capabilities (`CapEff = 0`).
+   - **Seccomp-BPF Syscall Filtering:** Classic BPF allowlist sealed in memory via `memfd_create`. Blocks `ptrace`, `unshare`, `setns`, `mount`, `bpf`, `kexec_load`, and module loading (`EPERM`), while forcing `clone3` to fall back to `clone()` (`ENOSYS`).
+   - **Fail-Closed Guarantee:** Setup failures terminate the child (`_exit(126)`) and clean up the cgroup. AXES never falls back to host execution.
 
-2. **Dedicated cgroups v2 Sandbox Isolation**
+2. **Dedicated cgroups v2 Resource Containment**
    - Per-job execution sandboxes under `/sys/fs/cgroup/axes/<job_id>`.
-   - Enforces CPU bandwidth (`cpu.max`), memory ceilings (`memory.max`), swap suppression (`memory.swap.max = 0`), and PID limits (`pids.max`).
+   - Strictly enforces CPU bandwidth (`cpu.max`), memory ceilings (`memory.max`), swap suppression (`memory.swap.max = 0`), and process count ceilings (`pids.max`).
+   - Atomic process tree termination using kernel `cgroup.kill` and fallback SIGKILL loops.
 
-3. **Dynamic Adaptive CPU Throttling**
-   - Continuous real-time metric sampling (CPU %, Memory MB, PID count, execution duration).
-   - Autonomous CPU limit reduction (e.g., rewriting `cpu.max` from 200% down to 100%) when sustained high CPU utilization is detected over consecutive sample windows.
+3. **Deterministic Adaptive CPU Policy**
+   - Continuous metric sampling (`CPU %`, `Memory MB`, `PID count`, `Duration`).
+   - Threshold detection: triggers only after `consecutive_samples_required` consecutive monitoring cycles above `cpu_threshold_pct`.
+   - One-way hysteresis latch: reduces quota (e.g., from 150% down to 50%) and latches until job exit to prevent rapid quota thrashing.
 
-4. **Real-time Local Web Dashboard**
-   - Embedded Python REST API server (`web/server.py`) serving a responsive, dark-mode dashboard at `http://127.0.0.1:8080`.
-   - Live canvas charts for CPU & memory telemetry, cgroup system readiness badges, active raw kernel control table, and execution history modal log viewer.
+4. **Non-Blocking Telemetry & Real Output Capture**
+   - Workload `stdout`/`stderr` captured separately into `reports/<job_id>_output.log` without contaminating telemetry logs.
+   - Bounded output stream capped at `max_output_bytes` (default 10 MB) to prevent disk exhaustion.
 
-5. **Built-in Workload Verification Suite**
-   - Automated scripts demonstrating CPU burn, memory OOM containment, PID limit bounds, and normal process completion.
-   - Structured text report generation with raw kernel control file evidence saved in `reports/`.
+5. **Developer Execution Workbench (GUI)**
+   - Embedded Python REST API server (`web/server.py`) serving an IDE-style workbench at `http://127.0.0.1:8080`.
+   - Staged file explorer with drag-and-drop / multipart upload, in-situ C/C++ compilation with compiler diagnostic capture, live incremental terminal output streaming, real-time telemetry meters, and persisted report viewer.
 
 ---
 
@@ -62,17 +73,26 @@ AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead
 AXES/
 ├── CMakeLists.txt              # CMake build configuration (C++17)
 ├── README.md                   # Complete system documentation
-├── .gitignore                  # Git ignore rules for build & temp files
+├── AXES_COMPLETION_PLAN.md     # Engineering phases and verification status
+├── AXES_FINAL_VERIFICATION.md  # Final verification report and checklist
+├── docs/
+│   ├── API.md                  # REST API contract and schema specification
+│   ├── THREAT_MODEL.md         # Comprehensive security and threat model
+│   └── evidence/               # GUI and execution evidence screenshots
 ├── scripts/
-│   └── setup_cgroups.sh        # cgroup v2 subtree delegation setup script
+│   └── setup_cgroups.sh        # cgroups v2 subtree delegation script
 ├── src/
-│   ├── main.cpp                # CLI entry point, argument parser, environment check
+│   ├── main.cpp                # CLI entry point, safe argument parser
 │   ├── launcher.hpp            # Process execution launcher & supervisor header
-│   ├── launcher.cpp            # Process launch, sync pipe, monitoring loop, report writer
+│   ├── launcher.cpp            # Process launch, sync barrier, monitoring loop, report writer
+│   ├── security.hpp            # Namespace isolation and seccomp header
+│   ├── security.cpp            # Bubblewrap containment and sealed BPF seccomp filter
+│   ├── policy.hpp              # Deterministic CPU hysteresis policy
 │   ├── cgroup.hpp              # cgroups v2 controller interface header
 │   ├── cgroup.cpp              # cgroups v2 directory & limit management
 │   ├── monitor.hpp             # Resource tracking monitor header
-│   └── monitor.cpp             # Periodic metric sampling & procfs fallback
+│   └── monitor.cpp             # Periodic metric sampling
+├── staging/                    # Managed directory for staged workloads & binaries
 ├── workloads/
 │   ├── cpu_burn.py             # Multi-process sustained CPU burn workload
 │   ├── memory_stress.py        # Gradual memory allocation stress workload
@@ -80,13 +100,17 @@ AXES/
 │   └── normal_workload.py      # Finite computation normal workload
 ├── tests/
 │   ├── test_suite.cpp          # C++ unit test suite source
-│   └── run_tests.sh            # End-to-end automated verification test runner
+│   ├── test_phase1.py          # Phase 1 CLI validation & web security tests
+│   ├── test_phase2.py          # Phase 2 runtime lifecycle & workbench backend tests
+│   ├── test_workbench.py       # Workbench API contract & kernel evidence tests
+│   ├── test_security.py        # Phase 4 security, namespace, and seccomp tests
+│   └── fixtures/               # Test fixtures and compilation test cases
 ├── web/
-│   ├── server.py               # Python REST API server (localhost:8080)
-│   ├── index.html              # Dashboard HTML interface
+│   ├── server.py               # Local REST API server (127.0.0.1:8080)
+│   ├── index.html              # Developer workbench interface
 │   ├── style.css               # Dark theme stylesheet
-│   └── app.js                  # Live metrics polling & canvas chart renderer
-└── reports/                    # Execution report output directory
+│   └── app.js                  # Workbench logic and incremental terminal poller
+└── reports/                    # Execution report output directory (.txt & .json)
 ```
 
 ---
@@ -94,13 +118,12 @@ AXES/
 ## 🚀 Quick Start & Building
 
 ### System Requirements
-- **OS:** Linux / Ubuntu on WSL2 with cgroups v2 mounted at `/sys/fs/cgroup`.
-- **Compiler:** GCC / G++ >= 9.0 (C++17 standard support).
-- **Build Tools:** CMake >= 3.14, Make.
-- **Runtime:** Python 3.x.
+- **OS:** Linux / Ubuntu on WSL2 (Kernel >= 5.14 with cgroups v2 mounted at `/sys/fs/cgroup`).
+- **Dependencies:** `bubblewrap` (`bwrap`), `gcc`, `g++`, `cmake`, `python3`.
+- **User:** Ordinary unprivileged user account (supervisor and workloads refuse root).
 
 ### 1. One-Time Setup: cgroup v2 Subtree Delegation
-Before running AXES, ensure cgroup v2 subtree write permissions are granted to your user account:
+Delegate write permissions for `/sys/fs/cgroup/axes` to your unprivileged user account:
 
 ```bash
 sudo ./scripts/setup_cgroups.sh
@@ -110,122 +133,131 @@ sudo ./scripts/setup_cgroups.sh
 Build the AXES binaries (`axes`, `test_axes`, `process_stress`):
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
-cd ..
+cmake -S . -B build
+cmake --build build -j
+```
+
+### 3. Verify System Environment
+Verify that cgroups v2 controllers (`cpu`, `memory`, `pids`) are active and writable:
+
+```bash
+./build/axes check
 ```
 
 ---
 
 ## 💻 CLI Usage
 
-### Check System Environment
-Verify cgroups v2 availability and controller writability:
-
 ```bash
-./build/axes check
+./build/axes run [options] [--] <program> [args...]
 ```
 
-### Run Job Command Format
-
-```bash
-./build/axes run [options] <program> [args...]
-```
-
-#### CLI Options Summary
+### CLI Options Summary
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `--job-id <id>` | `job-XXX` | Unique execution job identifier |
-| `--cpu-limit <pct>` | `200` | Initial CPU limit percentage |
-| `--memory-limit <mb>` | `512` | Memory ceiling limit in MB |
-| `--pids-limit <count>` | `64` | Maximum allowable process count |
-| `--cpu-threshold <pct>`| `150` | CPU % threshold to trigger dynamic adaptation |
-| `--consecutive <n>` | `3` | Consecutive samples above threshold to trigger action |
+| `--isolation <mode>` | `resource` | Isolation boundary: `isolated` (namespaces + seccomp) or `resource` (cgroups only) |
+| `--workspace <path>` | `.` | Staging workspace path mounted read-only at `/workspace` in isolated mode |
+| `--job-id <id>` | auto | Unique alphanumeric job identifier `[a-zA-Z0-9_-]` (1–64 chars) |
+| `--cpu-limit <pct>` | `200` | Initial CPU quota limit percentage (`1.0%` to `10,000.0%`) |
+| `--memory-limit <mb>` | `512` | Memory ceiling in MB (`1` to `1,048,576 MB`) |
+| `--pids-limit <count>` | `64` | Maximum allowable active processes (`1` to `4,194,304`) |
+| `--timeout <sec>` | `0.0` (off) | Wall-clock execution timeout in seconds (`0.01` to `86,400.0`) |
+| `--output-file <path>` | auto | Target file for child stdout/stderr (default: `reports/<job_id>_output.log`) |
+| `--max-output <mb>` | `10` | Maximum retained output size in MB before stream truncation |
+| `--cpu-threshold <pct>`| `150` | CPU % threshold to trigger adaptive throttling |
+| `--consecutive <n>` | `3` | Consecutive samples above threshold required to adapt |
 | `--reduced-cpu <pct>` | `100` | Reduced CPU limit after adaptation trigger |
-| `--sample-interval <s>`| `1.0` | Sampling interval in seconds |
+| `--sample-interval <s>`| `1.0` | Metric sampling interval in seconds (`0.05` to `3600.0`) |
 | `--no-adaptive` | `false` | Disable dynamic adaptive CPU throttling |
-| `--help` | - | Print usage help message |
+| `--help` | - | Display CLI options and usage help |
 
 ---
 
-## 🌐 Web Dashboard (GUI)
+## 🌐 Developer Workbench (GUI)
 
-AXES includes a real-time web interface for visual monitoring and control.
+AXES includes a local developer workbench with an integrated terminal, real-time telemetry meters, file staging, and compilation controls.
 
-### Launching the Dashboard
+### Launching the Workbench
+From the repository root (as an unprivileged user):
 
 ```bash
 python3 web/server.py
 ```
 
-Access the interface in your browser at:  
+Open your browser at:  
 👉 **`http://127.0.0.1:8080`**
 
-### Features
-- **Live Metric Visualizations**: Real-time canvas charts rendering CPU % and Memory consumption.
-- **System Readiness Panel**: Dynamic verification badges for kernel cgroup v2 controllers (`cpu`, `memory`, `pids`).
-- **Interactive Job Launcher**: Quick preset selection for test workloads with customizable limits.
-- **Kernel Evidence Table**: Direct inspection of `/sys/fs/cgroup/axes/<job_id>` control file values (`cpu.max`, `memory.max`, `pids.max`).
-- **Report Archives**: Full historical log table with built-in modal report reader.
+### Workbench Capabilities
+- **Execution Boundary Selector**: Choose between **Isolated** (`namespaces + Seccomp + read-only /workspace + no network`) and **Resource controls only** (for trusted benchmarking).
+- **Staging Explorer**: Drag-and-drop or browse files into `staging/`. Supports Python scripts, shell scripts, and native binaries.
+- **In-Situ Compilation**: Select `.c` or `.cpp` files and compile them into native `.bin` binaries with immediate GCC error diagnostics.
+- **Streaming Terminal**: Non-blocking incremental output polling (renders up to 500,000 characters) with auto-scroll and clear controls.
+- **Kernel Enforcement Panel**: Real-time display of measured CPU/Memory vs configured ceilings, supervisor PID attachment verification badge, and raw `/sys/fs/cgroup` control file inspector.
+- **Execution History & Reports**: Access full historical reports (`.txt` and `.json`) with timing, peaks, and event logs.
 
 ---
 
 ## 🧪 Workload Verification Demos
 
-### 1. Dynamic Adaptive CPU Control
-Executes a multi-process CPU burn workload under a 200% limit. When sustained usage exceeds 100%, AXES dynamically rewrites `cpu.max` down to 100% bandwidth.
+### 1. Dynamic Adaptive CPU Control Demo
+Runs a CPU burn workload under a 150% quota. When sustained usage exceeds 100% for 2 consecutive samples, AXES dynamically rewrites `cpu.max` down to 50%:
 
 ```bash
-./build/axes run --job-id job-cpu-demo --cpu-limit 200 --cpu-threshold 100 --consecutive 2 --sample-interval 0.8 python3 workloads/cpu_burn.py
+./build/axes run --job-id demo-cpu --timeout 3.0 --cpu-limit 150 --cpu-threshold 100 --consecutive 2 --reduced-cpu 50 python3 workloads/cpu_burn.py
 ```
 
-### 2. Memory Containment (OOM Kill)
-Allocates memory iteratively up to the 256 MB ceiling. With swap disabled, the kernel OOM killer terminates the target process via `SIGKILL`.
+### 2. Memory Containment (OOM Kill) Demo
+Allocates memory up to the 64 MB ceiling. With swap disabled (`memory.swap.max = 0`), the kernel terminates the process via `SIGKILL` (exit code `137`):
 
 ```bash
-./build/axes run --job-id job-memory-demo --memory-limit 256 --sample-interval 0.5 python3 workloads/memory_stress.py
+./build/axes run --job-id demo-mem --timeout 5.0 --memory-limit 64 python3 workloads/memory_stress.py
 ```
 
-### 3. Process Limit (PID Bounds)
-Fork-bombs child processes until reaching the max PID boundary (`pids.max = 15`), causing subsequent `fork()` calls to fail with `EAGAIN`.
+### 3. Process Limit (PID Bounds) Demo
+Forks child processes until reaching `pids.max = 4`, causing subsequent forks to fail with `EAGAIN` (`Resource temporarily unavailable`):
 
 ```bash
-./build/axes run --job-id job-process-demo --pids-limit 15 --sample-interval 0.5 ./build/process_stress
+./build/axes run --job-id demo-pids --pids-limit 4 ./build/process_stress
 ```
 
-### 4. Normal Workload Execution
-Runs a standard calculation task cleanly returning exit status 0.
+### 4. Isolated Workload Execution Demo
+Executes a Python script inside full namespace and Seccomp containment with read-only workspace:
 
 ```bash
-./build/axes run --job-id job-normal-demo python3 workloads/normal_workload.py
-```
-
----
-
-## 🧪 Automated Testing
-
-Execute unit tests and end-to-end automated sandbox verification:
-
-```bash
-./tests/run_tests.sh
+./build/axes run --job-id demo-iso --isolation isolated --workspace staging --timeout 3.0 python3 /workspace/workbench_smoke.py
 ```
 
 ---
 
-## 🔒 Security Scope & Roadmap
+## 🧪 Automated Test Suites
 
-AXES is currently focused on resource management and adaptive supervision.
+AXES includes 53 comprehensive automated tests across 5 test suites:
 
-- **Current Layer**: Linux cgroups v2 resource accounting and dynamic control (`cpu`, `memory`, `pids`).
-- **Roadmap / Future Features**:
-  - Namespace Isolation (`CLONE_NEWPID`, `CLONE_NEWNS`, `CLONE_NEWNET`).
-  - Syscall Filtering via Seccomp-BPF.
-  - Kernel event tracing using eBPF probes.
-  - Python SDK for autonomous agent integration.
+```bash
+# 1. C++ Unit Tests (Job validation, cgroup lifecycle, monitor, launcher timeout)
+./build/test_axes
+
+# 2. Phase 1 Integration Tests (CLI bounds, path traversal, origin/host security)
+python3 tests/test_phase1.py
+
+# 3. Phase 2 Integration Tests (Lifecycle, output bounding, staging, compilation, stop)
+python3 tests/test_phase2.py
+
+# 4. Workbench Contract Tests (Kernel controls, lossless UTF-8, process cleanup)
+python3 tests/test_workbench.py
+
+# 5. Phase 4 Security Integration Tests (Namespaces, seccomp, fail-closed, latching)
+python3 -m unittest tests/test_security.py
+```
 
 ---
 
-## 📜 License & Citation
+## 🔒 Security Architecture & Threat Model
+
+For detailed documentation of trust boundaries, privilege separation, Seccomp allowlists, and attack surface analysis, refer to [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+---
+
+## 📜 License
 
 Developed for Operating Systems Architecture & Resource Management research. Distributed under the MIT License.

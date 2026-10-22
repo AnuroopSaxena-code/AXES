@@ -231,6 +231,7 @@ class TestWebServerSecurity(unittest.TestCase):
             status2, headers2, body2 = self.make_request("/api/run", method="POST", data=payload)
             self.assertEqual(status2, 409)
             self.assertIn("already running", body2)
+            self.make_request(f"/api/job/{unique_id}/stop", method="POST", data={})
 
 
 if __name__ == "__main__":

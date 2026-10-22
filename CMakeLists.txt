@@ -23,6 +23,8 @@ set(AXES_SOURCES
     src/monitor.hpp
     src/launcher.cpp
     src/launcher.hpp
+    src/security.cpp
+    src/security.hpp
 )
 
 # Main Executable
