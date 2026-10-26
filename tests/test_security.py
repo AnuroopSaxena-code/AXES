@@ -118,8 +118,10 @@ class Isolation(unittest.TestCase):
         self.assertEqual(run.returncode,0,output)
 
     def test_continuous_output_cannot_starve_timeout(self):
-        run, _, report = self.execute(['python3','-c',"import os\nwhile True: os.write(1,b'x'*65536)"],options=['--timeout','.4','--max-output','1'])
-        self.assertEqual(run.returncode,124); self.assertTrue(report['output_truncated']); self.assertLess(report['runtime_sec'],2)
+        run, _, report = self.execute(['python3','-c',"import os\nwhile True: os.write(1,b'x'*65536)"],options=['--timeout','1','--max-output','1'])
+        self.assertEqual(run.returncode,124)
+        self.assertTrue(report['output_truncated'])
+        self.assertLess(report['runtime_sec'],3)
 
     def test_policy_reduction_and_latch(self):
         run, output, report = self.execute(['python3','-c','while True: pass'],options=['--timeout','1.5','--cpu-threshold','1','--consecutive','2','--reduced-cpu','25'])

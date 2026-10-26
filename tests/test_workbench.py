@@ -94,5 +94,25 @@ class WorkbenchContract(unittest.TestCase):
         procs = Path('/sys/fs/cgroup/axes') / job / 'cgroup.procs'
         self.assertTrue(not procs.exists() or not procs.read_text().strip())
 
+    def test_completed_job_retains_timestamped_valid_sample(self):
+        job = f'workbench-sample-{time.time_ns()}'
+        self.request('/run', {
+            'job_id': job,
+            'command': 'python3 -c "while True: pass"',
+            'timeout': 1,
+            'sample_interval': 0.1,
+            'adaptive': False,
+        })
+        for _ in range(100):
+            state = self.request('/job/' + job)
+            if state['status'] not in ('STARTING', 'RUNNING'):
+                break
+            time.sleep(.05)
+        valid = [sample for sample in state['history'] if sample.get('valid')]
+        self.assertEqual(state['status'], 'TIMED_OUT')
+        self.assertTrue(valid)
+        self.assertGreater(valid[-1]['cpu_pct'], 0)
+        self.assertGreater(valid[-1]['received_at'], 0)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -18,15 +18,20 @@ function controls() {
     const locked = state.busy || state.running;
     $('configuration').disabled = locked;
     $('run').disabled = locked || !state.ready;
+    $('run').hidden = state.running;
     $('stop').disabled = !state.running || state.busy;
-    $('compile').disabled = locked || !/\.(c|cpp|cc|cxx)$/i.test($('target').value);
+    $('stop').hidden = !state.running;
+    const canCompile = /\.(c|cpp|cc|cxx)$/i.test($('target').value);
+    $('compile').hidden = !canCompile || state.running;
+    $('compile').disabled = locked || !canCompile;
     $('upload').disabled = locked;
     document.querySelectorAll('.file button').forEach(b => b.disabled = locked);
 }
 async function checkSystem() {
     try {
         const d = await api('/status'); state.ready = d.ready;
-        text('connection', d.ready ? '● Kernel ready' : '○ Setup required');
+        text('connection', d.ready ? 'System ready' : 'Setup required');
+        $('connection').classList.toggle('ready', d.ready);
         text('cgroup-ready', d.ready ? 'Ready' : 'Not ready');
         text('system-diagnostics', d.output || d.error || 'No diagnostic output.');
         if (!d.ready) error('Kernel containment is not ready. Inspect raw kernel diagnostics; run sudo ./scripts/setup_cgroups.sh in Linux.');
@@ -90,6 +95,7 @@ function renderJob(d) {
             if ($(key) && key !== 'adaptive') $(key).value = value;
         }
         $('adaptive').checked = !!c.adaptive;
+        if (c.isolation) $('isolation').value = c.isolation;
         if (d.staged_file) {
             if (![...$('target').options].some(o => o.value === d.staged_file)) $('target').add(new Option(d.staged_file, d.staged_file));
             selectFile(d.staged_file); $('args').value = JSON.stringify(d.args || []);
@@ -101,10 +107,16 @@ function renderJob(d) {
     state.running = active(d.status); text('run-state', d.cancelled && state.running ? 'Stopping…' : d.status.replaceAll('_', ' '));
     text('elapsed', `Elapsed ${number(r.runtime_sec ?? d.runtime_sec, ' s')}`);
     text('exit', `Exit ${r.exit_code ?? d.exit_code ?? '—'}`);
-    const measured = d.metrics_valid === true && d.history?.length > 0;
-    text('metric-caption', measured ? `${state.running ? 'Measured' : 'Last sample'} · ${new Date(d.sample_received_at * 1000).toLocaleTimeString()}` : 'No valid measured sample available');
-    text('isolation-state', (c.isolation || r.isolation) === 'isolated' ? 'Isolated mode required · no network · read-only workspace' : 'Resource-only mode · host access retained');
-    const entries = [['cpu', m.cpu_pct, d.current_cpu_limit, '%'], ['memory', m.memory_mb, c.memory_limit, ' MiB'], ['pids', m.pids, c.pids_limit, '']];
+    const validHistory = (d.history || []).filter(sample => sample.valid === true);
+    const lastValid = validHistory.at(-1);
+    const measured = d.metrics_valid === true || !!lastValid;
+    const measuredValues = d.metrics_valid === true ? m : lastValid || m;
+    const measuredAt = d.metrics_valid === true ? d.sample_received_at : lastValid?.received_at;
+    text('metric-caption', measured ? `${state.running ? 'Measured' : 'Last valid sample'} · ${new Date(measuredAt * 1000).toLocaleTimeString()}` : 'No valid measured sample available');
+    const isolationMode = c.isolation || r.isolation || 'resource';
+    const established = d.isolation_established === true || r.isolation_established === true;
+    text('isolation-state', isolationMode === 'isolated' ? (established ? 'Verified namespace setup · Seccomp active · no network' : 'Isolated boundary requested; setup not yet confirmed') : 'Resource-only mode · host access retained');
+    const entries = [['cpu', measuredValues.cpu_pct, d.current_cpu_limit, '%'], ['memory', measuredValues.memory_mb, c.memory_limit, ' MiB'], ['pids', measuredValues.pids, c.pids_limit, '']];
     for (const [key, value, ceiling, unit] of entries) {
         text(`${key}-value`, measured ? number(value, unit, key === 'pids' ? 0 : 1) : '—');
         text(`${key}-ceiling`, `${key === 'cpu' ? 'Current quota' : key === 'memory' ? 'Ceiling' : 'PID limit'} ${number(ceiling, unit, 0)}`);
@@ -115,7 +127,29 @@ function renderJob(d) {
     text('timeout-status', c.timeout === 0 ? 'Unlimited' : number(c.timeout, ' s'));
     text('kernel', `${d.cgroup_path || r.cgroup_path || 'Cgroup unavailable'}\n\n${Object.entries(d.kernel_controls || {}).map(([k,v]) => `${k}: ${v ?? 'unavailable'}`).join('\n') || 'Live control files unavailable (job may have ended).'}`);
     text('policy-state', c.adaptive === false ? 'Disabled for this execution' : d.adaptive_triggered || r.adaptive_triggered ? 'Triggered · CPU quota reduced' : c.adaptive ? `Watching ≥ ${c.cpu_threshold}% for ${c.consecutive} samples` : 'Policy state unavailable');
-    text('events', (d.events || r.events || []).join('\n') || 'No policy events recorded.');
+    const rawEvents = d.events || r.event_timeline || r.events || [];
+    text('events', rawEvents.join('\n') || 'No policy events recorded.');
+    const status = r.final_status || r.status || d.status || 'UNKNOWN';
+    const exitCode = r.exit_code ?? d.exit_code;
+    const runtime = r.runtime_sec ?? d.runtime_sec;
+    const workload = d.staged_file || (Array.isArray(d.command) ? d.command.join(' ') : d.command) || (Array.isArray(r.command) ? r.command.join(' ') : r.command) || d.job_id;
+    text('summary-status', status.replaceAll('_', ' '));
+    $('summary-status').dataset.status = status;
+    $('summary-status').style.color = status === 'COMPLETED' ? 'var(--ok)' : ['FAILED','KILLED','TIMED_OUT','CANCELLED'].includes(status) ? 'var(--danger)' : '';
+    text('summary-workload', workload || 'Workload unavailable');
+    text('summary-duration', number(runtime, ' s'));
+    text('summary-exit', exitCode ?? '—');
+    const limits = r.limits || c;
+    text('summary-limits', limits.cpu_pct != null ? `${limits.cpu_pct}% CPU · ${limits.memory_mb} MiB · ${limits.pids} processes` : `${c.cpu_limit ?? '—'}% CPU · ${c.memory_limit ?? '—'} MiB · ${c.pids_limit ?? '—'} processes`);
+    text('summary-isolation', isolationMode === 'isolated' ? (established ? 'Verified isolated mode' : active(status) ? 'Establishing…' : 'Not verified') : 'Not requested · resource-only');
+    text('summary-attachment', d.pid_attached === 'YES' || r.pid_attached === 'YES' ? 'Confirmed in cgroup' : 'Not confirmed');
+    const adaptiveTriggered = d.adaptive_triggered || r.adaptive?.triggered || r.adaptive_triggered;
+    text('summary-policy', c.adaptive === false ? 'Disabled' : adaptiveTriggered ? `CPU reduced to ${r.adaptive?.final_cpu ?? d.current_cpu_limit}%` : 'No throttling triggered');
+    const meaningful = rawEvents.filter(event => /ADAPTIVE TRIGGER|POLICY ERROR|POLICY UNCHANGED/i.test(event)).map(event => {
+        const match = event.match(/^(\[[^\]]+\]) ADAPTIVE TRIGGER: CPU limit changed: ([\d.]+)% -> ([\d.]+)%.*usage=([\d.]+)%, threshold=([\d.]+)%/);
+        return match ? `${match[1]} CPU usage ${match[4]}% stayed above ${match[5]}%. AXES reduced the quota from ${match[2]}% to ${match[3]}%.` : event;
+    });
+    text('meaningful-events', meaningful.join('\n') || 'No policy intervention during this run.');
     controls();
 }
 async function poll(id, generation) {
@@ -140,8 +174,8 @@ async function poll(id, generation) {
     }
     setTimeout(() => poll(id, generation), delay);
 }
-function watch(id) {
-    state.job = id; state.offset = 0; state.output = ''; state.running = true; state.hydrated = false;
+function watch(id, restoreConfiguration = false) {
+    state.job = id; state.offset = 0; state.output = ''; state.running = true; state.hydrated = !restoreConfiguration;
     text('terminal', ''); text('job-id', id); localStorage.setItem('axes.activeJob', id);
     controls(); poll(id, ++state.generation);
 }
@@ -183,11 +217,11 @@ async function history() {
         const rows = await api('/history'); $('history-body').replaceChildren(); text('history-count', `${rows.length} executions`);
         for (const r of rows) {
             const tr = document.createElement('tr');
-            for (const value of [(Array.isArray(r.command) ? r.command.join(' ') : r.command) || r.job_id, r.final_status || r.status, number(r.runtime_sec, ' s'), r.exit_code ?? '—', r.start_time || '—']) {const td = document.createElement('td'); td.textContent = value; tr.append(td);}
+            for (const value of [(Array.isArray(r.command) ? r.command.join(' ') : r.command) || r.job_id, r.final_status || r.status, number(r.runtime_sec, ' s'), r.start_time || '—']) {const td = document.createElement('td'); td.textContent = value; tr.append(td);}
             if (r.command) {const small = document.createElement('small'); small.textContent = r.job_id; tr.firstChild.append(small);}
             const td = document.createElement('td'), b = document.createElement('button'); b.textContent = 'Open report'; b.onclick = () => openReport(r.job_id); td.append(b); tr.append(td); $('history-body').append(tr);
         }
-        if (!rows.length) {const td = document.createElement('td'); td.colSpan = 6; td.textContent = 'No executions recorded yet. Run a workload to create a report.'; const tr = document.createElement('tr'); tr.append(td); $('history-body').append(tr);}
+        if (!rows.length) {const td = document.createElement('td'); td.colSpan = 5; td.textContent = 'No executions recorded yet. Run a workload to create a report.'; const tr = document.createElement('tr'); tr.append(td); $('history-body').append(tr);}
     } catch(e) {text('history-count', `Failed to load: ${e.message}`);}
 }
 async function openReport(id) {state.report = id; text('report-title', id); $('report-dialog').showModal(); await reportView(false);}
@@ -211,5 +245,5 @@ $('copy').onclick = async () => {try {await navigator.clipboard.writeText(state.
 $('close-report').onclick = () => $('report-dialog').close();
 $('report-data').onclick = () => reportView(false); $('report-output').onclick = () => reportView(true);
 Promise.allSettled([checkSystem(), files(), history()]);
-const restored = localStorage.getItem('axes.activeJob'); if (restored) watch(restored);
+const restored = localStorage.getItem('axes.activeJob'); if (restored) watch(restored, true);
 setInterval(checkSystem, 15000);

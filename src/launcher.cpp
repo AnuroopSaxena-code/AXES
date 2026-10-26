@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <poll.h>
 #include <csignal>
 
 namespace axes {
@@ -104,6 +105,8 @@ void ExecutionLauncher::write_execution_report(const ExecutionResult& result) {
         ofs << "Status:             " << result.final_status << "\n";
         ofs << "Isolation mode:     " << config_.isolation << "\n";
         ofs << "Security profile:   " << (config_.isolation == "isolated" ? "bwrap + axes-native-x86_64-v1 (required; setup failure prevents exec)" : "resource-only; trusted workloads") << "\n";
+        ofs << "Isolation verified: " << (result.isolation_established ? "YES" : "NO") << "\n";
+        if (!result.isolation_evidence.empty()) ofs << "Isolation evidence: " << result.isolation_evidence << "\n";
         ofs << "Exit code / Signal: ";
         if (result.terminated_by_signal) {
             ofs << "Signal " << result.signal_number << "\n";
@@ -172,6 +175,8 @@ void ExecutionLauncher::write_execution_report(const ExecutionResult& result) {
         jfs << "  \"exit_code\": " << result.exit_code << ",\n";
         jfs << "  \"isolation\": \"" << config_.isolation << "\",\n";
         jfs << "  \"security_profile\": \"" << (config_.isolation == "isolated" ? "axes-native-x86_64-v1" : "resource-only") << "\",\n";
+        jfs << "  \"isolation_established\": " << (result.isolation_established ? "true" : "false") << ",\n";
+        jfs << "  \"isolation_evidence\": \"" << json_escape(result.isolation_evidence) << "\",\n";
         jfs << "  \"terminated_by_signal\": " << (result.terminated_by_signal ? "true" : "false") << ",\n";
         jfs << "  \"signal_number\": " << result.signal_number << ",\n";
         jfs << "  \"timed_out\": " << (result.timed_out ? "true" : "false") << ",\n";
@@ -344,6 +349,15 @@ ExecutionResult ExecutionLauncher::run() {
         return result;
     }
 
+    int isolation_pipe[2] = {-1, -1};
+    if (config_.isolation == "isolated" && pipe(isolation_pipe) < 0) {
+        std::perror("[AXES] isolation evidence pipe failed");
+        close(sync_pipe[0]); close(sync_pipe[1]); close(out_pipe[0]); close(out_pipe[1]);
+        if (out_fd >= 0) close(out_fd);
+        cgroup.cleanup(); result.exit_code = 126; result.final_status = "FAILED";
+        return result;
+    }
+
     // Set read end of output pipe to non-blocking
     int fl = fcntl(out_pipe[0], F_GETFL, 0);
     fcntl(out_pipe[0], F_SETFL, fl | O_NONBLOCK);
@@ -366,6 +380,8 @@ ExecutionResult ExecutionLauncher::run() {
         close(sync_pipe[1]);
         close(out_pipe[0]);
         close(out_pipe[1]);
+        if (isolation_pipe[0] >= 0) close(isolation_pipe[0]);
+        if (isolation_pipe[1] >= 0) close(isolation_pipe[1]);
         if (out_fd >= 0) close(out_fd);
         sigaction(SIGINT, &old_int, nullptr);
         sigaction(SIGTERM, &old_term, nullptr);
@@ -384,6 +400,7 @@ ExecutionResult ExecutionLauncher::run() {
 
         close(sync_pipe[1]); // Close write end of barrier
         close(out_pipe[0]);  // Close read end of output pipe
+        if (isolation_pipe[0] >= 0) close(isolation_pipe[0]);
 
         // Redirect stdout and stderr to out_pipe[1]
         dup2(out_pipe[1], STDOUT_FILENO);
@@ -402,14 +419,19 @@ ExecutionResult ExecutionLauncher::run() {
 
         // Close every inherited descriptor except output streams. Workloads must not
         // inherit host directory, socket, terminal or writable report descriptors.
+        int info_fd = -1;
+        if (isolation_pipe[1] >= 0) {
+            info_fd = 3;
+            if (dup2(isolation_pipe[1], info_fd) < 0) _exit(126);
+        }
         int null_fd = open("/dev/null", O_RDONLY);
         if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0 ||
-            syscall(SYS_close_range, 3U, UINT_MAX, 0) < 0 ||
+            syscall(SYS_close_range, static_cast<unsigned>(info_fd >= 0 ? 4 : 3), UINT_MAX, 0) < 0 ||
             prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
             std::perror("[AXES Child] descriptor/privilege setup failed; no execution");
             _exit(126);
         }
-        if (config_.isolation == "isolated") exec_isolated(config_.command, config_.workspace);
+        if (config_.isolation == "isolated") exec_isolated(config_.command, config_.workspace, info_fd);
 
         // Build argv array
         std::vector<char*> argv;
@@ -428,6 +450,7 @@ ExecutionResult ExecutionLauncher::run() {
     // Parent Process
     close(sync_pipe[0]); // Close read end of barrier
     close(out_pipe[1]);  // Close write end of output pipe
+    if (isolation_pipe[1] >= 0) close(isolation_pipe[1]);
 
     std::cout << "PID:         " << pid << "\n";
     std::cout << "Cgroup Path: " << cgroup.get_cgroup_path() << "\n";
@@ -438,6 +461,7 @@ ExecutionResult ExecutionLauncher::run() {
         kill(pid, SIGKILL);
         close(sync_pipe[1]);
         close(out_pipe[0]);
+        if (isolation_pipe[0] >= 0) close(isolation_pipe[0]);
         if (out_fd >= 0) close(out_fd);
         int status = 0;
         waitpid(pid, &status, 0); // reap child
@@ -459,6 +483,7 @@ ExecutionResult ExecutionLauncher::run() {
         kill(pid, SIGKILL);
         close(sync_pipe[1]);
         close(out_pipe[0]);
+        if (isolation_pipe[0] >= 0) close(isolation_pipe[0]);
         if (out_fd >= 0) close(out_fd);
         int status = 0;
         waitpid(pid, &status, 0); // reap child
@@ -480,6 +505,7 @@ ExecutionResult ExecutionLauncher::run() {
         kill(pid, SIGKILL);
         close(sync_pipe[1]);
         close(out_pipe[0]);
+        if (isolation_pipe[0] >= 0) close(isolation_pipe[0]);
         if (out_fd >= 0) close(out_fd);
         int status = 0;
         waitpid(pid, &status, 0); // reap child
@@ -493,6 +519,25 @@ ExecutionResult ExecutionLauncher::run() {
         return result;
     }
     close(sync_pipe[1]);
+    if (isolation_pipe[0] >= 0) {
+        pollfd evidence_poll{isolation_pipe[0], POLLIN | POLLHUP, 0};
+        if (poll(&evidence_poll, 1, 3000) > 0) {
+            char evidence[4096]{};
+            ssize_t count = read(isolation_pipe[0], evidence, sizeof(evidence) - 1);
+            if (count > 0) {
+                result.isolation_evidence.assign(evidence, static_cast<size_t>(count));
+                result.isolation_established = result.isolation_evidence.find("pid-namespace") != std::string::npos &&
+                    result.isolation_evidence.find("net-namespace") != std::string::npos &&
+                    result.isolation_evidence.find("mnt-namespace") != std::string::npos;
+            }
+        }
+        close(isolation_pipe[0]);
+        if (!result.isolation_established) {
+            std::cout << "Isolation:   FAILED (namespace setup not confirmed; workload cannot run on host)\n";
+        } else {
+            std::cout << "Isolation:   VERIFIED (mount, PID, network namespaces; Seccomp requested)\n";
+        }
+    }
     std::cout << "Status:      RUNNING\n" << std::endl;
 
     // Helper lambda to drain child output from pipe

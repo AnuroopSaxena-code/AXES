@@ -88,7 +88,8 @@ int profile_fd() {
 #endif
 }
 }
-[[noreturn]] void exec_isolated(const std::vector<std::string>& command, const std::string& workspace) {
+[[noreturn]] void exec_isolated(const std::vector<std::string>& command, const std::string& workspace,
+                                int info_fd) {
     if (getuid() == 0 || geteuid() == 0) { errno = EPERM; fail("root execution refused"); }
     std::error_code ec;
     auto root = std::filesystem::canonical(workspace, ec);
@@ -111,7 +112,7 @@ int profile_fd() {
         "--ro-bind", root.string(), "/workspace", "--chdir", "/workspace",
         "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",
         "--setenv", "LANG", "C.UTF-8", "--setenv", "PYTHONUNBUFFERED", "1",
-        "--seccomp", std::to_string(fd), "--"};
+        "--seccomp", std::to_string(fd), "--info-fd", std::to_string(info_fd), "--"};
     args.insert(args.end(), tail.begin(), tail.end());
     args.insert(args.end(), command.begin(), command.end());
     std::vector<char*> argv;

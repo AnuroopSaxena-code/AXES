@@ -56,6 +56,8 @@ struct ExecutionResult {
     // CGroup verification evidence fields
     bool cgroup_setup_failed{false};
     bool process_attached_verified{false};
+    bool isolation_established{false};
+    std::string isolation_evidence;
     std::string cgroup_path;
     std::string cpu_max_initial;
     std::string cpu_max_final;

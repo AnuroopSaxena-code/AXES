@@ -1,15 +1,20 @@
 # AXES Security Architecture & Threat Model
 
-**Document Version:** 1.0  
-**Target System:** AXES (Adaptive eXecution Environment Sandbox)  
-**Kernel Requirements:** Linux >= 5.14, cgroups v2, BPF seccomp, User Namespaces  
-**Operating Environment:** Native Linux or WSL2 (Ubuntu 24.04+, Kernel 6.18+)  
+**Document Version:** 1.0
+
+**Target System:** AXES (Adaptive eXecution Environment Sandbox)
+
+**Kernel Requirements:** Linux >= 5.14, unified cgroups v2 with delegated `cpu`, `memory`, and `pids` controllers, user/PID/mount/network/IPC/UTS/cgroup namespaces, and Seccomp-BPF
+
+**Runtime Requirements:** x86_64, Bubblewrap (`/usr/bin/bwrap`), and an ordinary user account
+
+**Verified Environment:** Ubuntu on WSL2, kernel 6.18.33-microsoft-standard-WSL2
 
 ---
 
 ## 1. Executive Summary
 
-AXES is designed to execute untrusted and semi-trusted workloads (user-submitted code, benchmarks, compiled binaries, Python scripts) under strict resource bounds and defense-in-depth isolation.
+AXES applies resource bounds and defense-in-depth isolation to staged workloads. The current profile is verified against representative shell, Python/threading, and compiled C programs. It is not a complete boundary against kernel vulnerabilities or an assurance that every language runtime is compatible.
 
 The security model is built on three core tenets:
 1. **Separation of Privilege:** The execution supervisor and untrusted workloads **never run as root**. Privileged cgroup delegation is performed once by an administrator; all runtime operations run as an unprivileged user.
@@ -25,7 +30,7 @@ AXES is designed to defend against malicious or buggy workloads attempting:
 
 | Threat Category | Adversarial Action | AXES Mitigation |
 | :--- | :--- | :--- |
-| **CPU Denial of Service** | Infinite loops, multi-threaded CPU burning (`cpu_burn.py`) | cgroups v2 `cpu.max` quota enforcement; deterministic two-way adaptive throttling policy; supervisor wall-clock timeout. |
+| **CPU Denial of Service** | Infinite loops, multi-threaded CPU burning (`cpu_burn.py`) | cgroups v2 `cpu.max` quota enforcement; deterministic one-way adaptive reduction; supervisor wall-clock timeout. |
 | **Memory Exhaustion** | Unbounded heap allocation, memory leaks (`memory_stress.py`) | cgroups v2 `memory.max` enforcement; `memory.swap.max = 0` (swap disabled); kernel OOM killer terminates rogue process without host disruption. |
 | **Process / Fork Bombs** | Recursive process spawning, zombie generation (`process_stress.c`) | cgroups v2 `pids.max` limits total processes; supervisor process subreaper (`PR_SET_CHILD_SUBREAPER`) reaps descendants; atomic cleanup via `cgroup.kill`. |
 | **Filesystem Tampering** | Writing to host filesystem, traversing paths (`../../`), overwriting binaries | Staged workspace mounted read-only (`/workspace`); `/tmp` backed by isolated `tmpfs`; host roots (`/mnt/c`, `/sys/fs/cgroup`) unmapped; strict path traversal sanitization in supervisor and API. |
@@ -38,6 +43,8 @@ AXES is designed to defend against malicious or buggy workloads attempting:
 - **Kernel Zero-Day Exploits:** Workloads share the host Linux kernel. A vulnerability within an allowed syscall in the host kernel could theoretically permit kernel privilege escalation.
 - **Microarchitectural Side Channels:** Speculative execution timing attacks (Spectre/Meltdown) between co-located physical cores are not mitigated without dedicated CPU core pinning and kernel thread isolation.
 - **Hardware Fault Injection:** Physical attacks or hardware-level fault injection are outside the software sandbox model.
+- **Trusted Control Plane:** The repository, AXES binary, Python API, Bubblewrap binary, host kernel, administrator setup, and staged-workspace owner are trusted. Compiling C/C++ in the workbench invokes the host compiler outside the sandbox and must be limited to trusted source.
+- **Resource-Only Mode:** `--isolation resource` enforces cgroup limits but deliberately retains host filesystem, process, and network visibility. It is not an isolation mode for hostile code.
 
 ---
 
@@ -64,8 +71,8 @@ AXES is designed to defend against malicious or buggy workloads attempting:
          v (Barrier Verification)                    v (Output Draining)
 +-----------------------------------+     +--------------------------------+
 | UNTRUSTED WORKLOAD ISOLATION      |     | STREAMED METRICS & LOGS        |
-| - Namespaces: PID, MNT, NET,      |     | - Workload stdout/stderr pipe  |
-|   IPC, UTS, CGROUP                |     | - Separated from supervisor log|
+| - Namespaces: USER, PID, MNT,     |     | - Workload stdout/stderr pipe  |
+|   NET, IPC, UTS, CGROUP           |     | - Separated from supervisor log|
 | - PR_SET_NO_NEW_PRIVS             |     | - Bounded at 10 MB cap         |
 | - Cap-drop: ALL (CapEff = 0)      |     | - JSON report generation       |
 | - Seccomp-BPF positive allowlist  |     +--------------------------------+
@@ -146,8 +153,8 @@ AXES features a deterministic resource policy governing CPU usage:
 
 | Security Property | Implementation Mechanism | Verification Test | Result |
 | :--- | :--- | :--- | :---: |
-| **Non-Root Execution** | UID/EUID validation in C++ and Python | `test_security.py` | **PASS** |
-| **Namespace Isolation** | `bwrap` with 6 unshared namespaces | `test_namespace_filesystem_network_and_privileges` | **PASS** |
+| **Non-Root Execution** | UID/EUID validation in C++ and Python | Direct root invocation plus isolated UID/capability probe | **PASS** |
+| **Namespace Isolation** | `bwrap` with 7 unshared namespaces | `test_namespace_filesystem_network_and_privileges` | **PASS** |
 | **Read-Only Workspace** | Read-only bind mount at `/workspace` | `test_host_file_not_visible_even_through_proc_root` | **PASS** |
 | **Network Block** | `CLONE_NEWNET`, unmapped loopback | Socket creation blocked with `EPERM` | **PASS** |
 | **Seccomp Protection** | BPF allowlist sealed in memfd | Blocked syscall probe (`ptrace`, `bpf`, `unshare`) | **PASS** |

@@ -6,11 +6,11 @@
 [![Security](https://img.shields.io/badge/Isolation-Namespaces%20%2B%20Seccomp--BPF-red.svg)](docs/THREAT_MODEL.md)
 [![Workbench](https://img.shields.io/badge/Workbench-Developer%20GUI-brightgreen.svg)](http://127.0.0.1:8080)
 
-AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead Linux execution supervisor and developer workbench designed to safely execute untrusted programs, benchmarks, and autonomous workloads. AXES combines **Linux cgroups v2**, **Linux namespaces (PID, Mount, Net, IPC, UTS, Cgroup)**, and **Seccomp-BPF syscall filtering** to enforce strict resource bounds and defense-in-depth isolation with a strict **fail-closed guarantee (no host fallback)**.
+AXES (**Adaptive eXecution Environment Sandbox**) is a Linux execution supervisor and developer workbench for bounded workloads. Isolated mode combines **Linux cgroups v2**, **Linux namespaces (PID, Mount, Net, IPC, UTS, Cgroup, User)**, and an x86_64 **Seccomp-BPF syscall filter**. Required setup fails closed with no host fallback. This is defense in depth over a shared host kernel, not a VM-grade boundary; read the threat model before running hostile code.
 
 ---
 
-## 📸 Architecture & Defense-in-Depth Model
+## Architecture & Defense-in-Depth Model
 
 ```text
                                   +-----------------------+
@@ -29,7 +29,7 @@ AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead
 +-----------------------+                +-----------------------+                +-----------------------+
 |   cgroups v2 Engine   |                |   Monitor & Policy    |                | Isolated Child Sandbox|
 | /sys/fs/cgroup/axes/  |                | Real-time sampling    |                | Bubblewrap (bwrap)    |
-| - cpu.max (quota)     |                | Two-way CPU policy    |                | - PID/MNT/NET/IPC/UTS |
+| - cpu.max (quota)     |                | One-way CPU reduction |                | - PID/MNT/NET/IPC/UTS |
 | - memory.max (ceiling)|                | Consecutive threshold |                | - Read-only /workspace|
 | - memory.swap.max = 0 |                | One-way hysteresis    |                | - Ephemeral /tmp tmpfs|
 | - pids.max (limits)   |                | Subreaper cleanup     |                | - Cap-drop ALL        |
@@ -67,14 +67,12 @@ AXES (**Adaptive eXecution Environment Sandbox**) is a lightweight, low-overhead
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 AXES/
 ├── CMakeLists.txt              # CMake build configuration (C++17)
 ├── README.md                   # Complete system documentation
-├── AXES_COMPLETION_PLAN.md     # Engineering phases and verification status
-├── AXES_FINAL_VERIFICATION.md  # Final verification report and checklist
 ├── docs/
 │   ├── API.md                  # REST API contract and schema specification
 │   ├── THREAT_MODEL.md         # Comprehensive security and threat model
@@ -115,7 +113,7 @@ AXES/
 
 ---
 
-## 🚀 Quick Start & Building
+## Quick Start & Building
 
 ### System Requirements
 - **OS:** Linux / Ubuntu on WSL2 (Kernel >= 5.14 with cgroups v2 mounted at `/sys/fs/cgroup`).
@@ -146,7 +144,7 @@ Verify that cgroups v2 controllers (`cpu`, `memory`, `pids`) are active and writ
 
 ---
 
-## 💻 CLI Usage
+## CLI Usage
 
 ```bash
 ./build/axes run [options] [--] <program> [args...]
@@ -173,9 +171,9 @@ Verify that cgroups v2 controllers (`cpu`, `memory`, `pids`) are active and writ
 
 ---
 
-## 🌐 Developer Workbench (GUI)
+## Developer Workbench (GUI)
 
-AXES includes a local developer workbench with an integrated terminal, real-time telemetry meters, file staging, and compilation controls.
+AXES includes a compact Configure → Execute → Results workbench with staged files, captured output, timestamped telemetry, enforcement evidence and persisted reports.
 
 ### Launching the Workbench
 From the repository root (as an unprivileged user):
@@ -185,19 +183,19 @@ python3 web/server.py
 ```
 
 Open your browser at:  
-👉 **`http://127.0.0.1:8080`**
+**`http://127.0.0.1:8080`**
 
 ### Workbench Capabilities
 - **Execution Boundary Selector**: Choose between **Isolated** (`namespaces + Seccomp + read-only /workspace + no network`) and **Resource controls only** (for trusted benchmarking).
 - **Staging Explorer**: Drag-and-drop or browse files into `staging/`. Supports Python scripts, shell scripts, and native binaries.
-- **In-Situ Compilation**: Select `.c` or `.cpp` files and compile them into native `.bin` binaries with immediate GCC error diagnostics.
+- **Host-Side Compilation**: Select trusted `.c` or `.cpp` files and compile them into native `.bin` binaries with immediate GCC error diagnostics. Compilation itself is not sandboxed.
 - **Streaming Terminal**: Non-blocking incremental output polling (renders up to 500,000 characters) with auto-scroll and clear controls.
 - **Kernel Enforcement Panel**: Real-time display of measured CPU/Memory vs configured ceilings, supervisor PID attachment verification badge, and raw `/sys/fs/cgroup` control file inspector.
 - **Execution History & Reports**: Access full historical reports (`.txt` and `.json`) with timing, peaks, and event logs.
 
 ---
 
-## 🧪 Workload Verification Demos
+## Workload Verification Demos
 
 ### 1. Dynamic Adaptive CPU Control Demo
 Runs a CPU burn workload under a 150% quota. When sustained usage exceeds 100% for 2 consecutive samples, AXES dynamically rewrites `cpu.max` down to 50%:
@@ -224,14 +222,14 @@ Forks child processes until reaching `pids.max = 4`, causing subsequent forks to
 Executes a Python script inside full namespace and Seccomp containment with read-only workspace:
 
 ```bash
-./build/axes run --job-id demo-iso --isolation isolated --workspace staging --timeout 3.0 python3 /workspace/workbench_smoke.py
+./build/axes run --job-id demo-iso --isolation isolated --workspace workloads --timeout 3.0 -- python3 /workspace/normal_workload.py
 ```
 
 ---
 
-## 🧪 Automated Test Suites
+## Automated Test Suites
 
-AXES includes 53 comprehensive automated tests across 5 test suites:
+AXES includes 55 automated checks across 5 test suites:
 
 ```bash
 # 1. C++ Unit Tests (Job validation, cgroup lifecycle, monitor, launcher timeout)
@@ -247,17 +245,17 @@ python3 tests/test_phase2.py
 python3 tests/test_workbench.py
 
 # 5. Phase 4 Security Integration Tests (Namespaces, seccomp, fail-closed, latching)
-python3 -m unittest tests/test_security.py
+python3 tests/test_security.py
 ```
 
 ---
 
-## 🔒 Security Architecture & Threat Model
+## Security Architecture & Threat Model
 
 For detailed documentation of trust boundaries, privilege separation, Seccomp allowlists, and attack surface analysis, refer to [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ---
 
-## 📜 License
+## License
 
 Developed for Operating Systems Architecture & Resource Management research. Distributed under the MIT License.

@@ -198,10 +198,13 @@ Launches a contained workload through the AXES C++ supervisor. Supports either e
   "consecutive": 3,
   "reduced_cpu": 100.0,
   "sample_interval": 0.5,
-  "adaptive": true
+  "adaptive": true,
+  "isolation": "isolated"
 }
 ```
 *Alternatively, pass `"command": "python3 workloads/cpu_burn.py"` instead of `"staged_file"`.*
+
+`isolation` accepts `resource` (cgroup controls only, for trusted workloads) or `isolated` (required namespace, filesystem, network and Seccomp setup). Isolated setup failure terminates the job and never retries in resource mode. Staged files execute from `/workspace/<filename>` in isolated mode.
 
 - **Response `200 OK`**:
 ```json
@@ -229,6 +232,9 @@ Returns live telemetry, resource usage, adaptive state, and status for an active
   "pid": 12345,
   "cgroup_path": "/sys/fs/cgroup/axes/job-stress-01",
   "pid_attached": "YES",
+  "isolation_established": true,
+  "metrics_valid": true,
+  "sample_received_at": 1792648800.25,
   "runtime_sec": 3.5,
   "metrics": {
     "cpu_pct": 182.4,
@@ -319,5 +325,7 @@ Live `GET /api/job/{id}` responses also include:
 - `staged_file`: staged filename, or null for command mode.
 - `args`: staged argument array.
 - `kernel_controls`: current reads of `cpu.max`, `memory.max`, `memory.swap.max`, `pids.max`, and `cgroup.procs`. Values are strings or null when a file is unavailable; completed cgroups may already have been removed.
+- `isolation_established`: true only after the supervisor validates Bubblewrap namespace evidence. A requested mode alone never sets this field.
+- `metrics_valid` and timestamped `history` entries: identify cgroup samples that were successfully read. The UI retains the last valid sample after the final empty-cgroup read.
 
 Stop acknowledges the cancellation request, but live status stays STARTING/RUNNING until the supervisor exits and report/output finalization completes. `cancelled: true` during that interval means cancellation is pending. Output byte offsets leave an incomplete UTF-8 character for the following chunk instead of emitting corrupt replacement characters.

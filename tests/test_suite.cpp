@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 namespace fs = std::filesystem;
@@ -64,7 +65,7 @@ void test_invalid_job_id_rejection() {
 }
 
 void test_cgroup_lifecycle() {
-    std::cout << "[Test 3] Testing CGroupController Lifecycle..." << std::endl;
+    std::cout << "[Test 4] Testing CGroupController Lifecycle..." << std::endl;
     axes::CGroupController cgroup("test-job-001");
     bool init_ok = cgroup.init(200.0, 512, 32);
     std::cout << "  Cgroup Init Result: " << (init_ok ? "SUCCESS" : "FAIL") << std::endl;
@@ -94,8 +95,32 @@ void test_cgroup_lifecycle() {
     std::cout << "  Cgroup lifecycle passed!\n" << std::endl;
 }
 
+void test_inaccessible_cgroup_path_fails_cleanly() {
+    std::cout << "[Test 3] Testing Inaccessible Cgroup Failure Handling..." << std::endl;
+    fs::path base = fs::path("/tmp") / ("axes-unreadable-" + std::to_string(getpid()));
+    std::error_code ec;
+    fs::create_directories(base, ec);
+    assert(!ec);
+    assert(chmod(base.c_str(), 0000) == 0);
+
+    bool initialized = true;
+    try {
+        axes::CGroupController denied("permission-denied", base.string());
+        initialized = denied.init(100.0, 64, 8);
+    } catch (...) {
+        chmod(base.c_str(), 0700);
+        fs::remove_all(base, ec);
+        assert(false && "Permission failure must not escape as an exception");
+    }
+
+    assert(!initialized);
+    assert(chmod(base.c_str(), 0700) == 0);
+    fs::remove_all(base, ec);
+    std::cout << "  Inaccessible cgroup path failed closed without an exception!\n" << std::endl;
+}
+
 void test_monitor_sampling() {
-    std::cout << "[Test 4] Testing Monitor Sampling & PID Attachment..." << std::endl;
+    std::cout << "[Test 5] Testing Monitor Sampling & PID Attachment..." << std::endl;
     axes::CGroupController cgroup("test-job-002");
     bool init_ok = cgroup.init(200.0, 256, 16);
     if (!init_ok) {
@@ -133,7 +158,7 @@ void test_monitor_sampling() {
 }
 
 void test_normal_launcher_run() {
-    std::cout << "[Test 5] Testing ExecutionLauncher Normal Run & Output Capture..." << std::endl;
+    std::cout << "[Test 6] Testing ExecutionLauncher Normal Run & Output Capture..." << std::endl;
     axes::Config config;
     config.job_id = "test-job-normal";
     config.command = {"echo", "AXES Sandbox Test Success"};
@@ -158,7 +183,7 @@ void test_normal_launcher_run() {
 }
 
 void test_launcher_timeout() {
-    std::cout << "[Test 6] Testing ExecutionLauncher Wall-Clock Timeout..." << std::endl;
+    std::cout << "[Test 7] Testing ExecutionLauncher Wall-Clock Timeout..." << std::endl;
     axes::Config config;
     config.job_id = "test-job-timeout";
     config.command = {"sleep", "5"};
@@ -190,6 +215,7 @@ int main() {
 
     test_job_id_validation();
     test_invalid_job_id_rejection();
+    test_inaccessible_cgroup_path_fails_cleanly();
 
     auto env = axes::CGroupController::check_environment("/sys/fs/cgroup");
     if (!env.is_ready()) {

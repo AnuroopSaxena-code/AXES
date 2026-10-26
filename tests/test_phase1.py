@@ -129,9 +129,10 @@ class TestWebServerSecurity(unittest.TestCase):
         if cls.server_proc:
             cls.server_proc.terminate()
             try:
-                cls.server_proc.wait(timeout=2.0)
+                cls.server_proc.communicate(timeout=2.0)
             except subprocess.TimeoutExpired:
                 cls.server_proc.kill()
+                cls.server_proc.communicate(timeout=2.0)
 
     def make_request(self, path, method="GET", data=None, headers=None):
         url = f"http://127.0.0.1:{self.server_port}{path}"
@@ -150,8 +151,9 @@ class TestWebServerSecurity(unittest.TestCase):
                 resp_body = resp.read().decode("utf-8")
                 return resp.status, resp.headers, resp_body
         except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8") if e.fp else ""
-            return e.code, e.headers, err_body
+            with e:
+                err_body = e.read().decode("utf-8") if e.fp else ""
+                return e.code, e.headers, err_body
 
     def test_no_wildcard_cors(self):
         # Verify that Access-Control-Allow-Origin: * is NOT sent on any response

@@ -131,13 +131,15 @@ class TestPhase2WorkbenchServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.server_proc:
+            cls.server_proc.terminate()
             try:
                 out, err = cls.server_proc.communicate(timeout=2.0)
-                if cls.server_proc.returncode != 0:
+                if cls.server_proc.returncode not in (0, -signal.SIGTERM):
                     print("SERVER EXITED WITH CODE:", cls.server_proc.returncode)
                     print("SERVER STDERR:", err.decode())
-            except:
+            except subprocess.TimeoutExpired:
                 cls.server_proc.kill()
+                cls.server_proc.communicate(timeout=2.0)
 
     def _api_get(self, path):
         req = urllib.request.Request(f"{self.base_url}{path}")
@@ -159,7 +161,8 @@ class TestPhase2WorkbenchServer(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read().decode())
+            with e:
+                return e.code, json.loads(e.read().decode())
 
     def _api_delete(self, path):
         req = urllib.request.Request(
@@ -171,7 +174,8 @@ class TestPhase2WorkbenchServer(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return resp.status, json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read().decode())
+            with e:
+                return e.code, json.loads(e.read().decode())
 
     def test_status_endpoint_staging(self):
         status, data = self._api_get("/api/status")

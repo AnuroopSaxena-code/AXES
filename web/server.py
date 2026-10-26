@@ -327,6 +327,8 @@ def run_job_thread(job_id, cmd_list, config):
             elif line_str.startswith("Cgroup PID:"):
                 if "VERIFIED" in line_str:
                     state["pid_attached"] = "YES"
+            elif line_str.startswith("Isolation:"):
+                state["isolation_established"] = "VERIFIED" in line_str
 
             if line_str.startswith("Metrics Valid:"):
                 state["metrics_valid"] = line_str.endswith("YES")
@@ -354,7 +356,9 @@ def run_job_thread(job_id, cmd_list, config):
                         "runtime": snapshot_runtime,
                         "cpu_pct": snapshot_cpu,
                         "memory_mb": snapshot_mem,
-                        "pids": snapshot_pids
+                        "pids": snapshot_pids,
+                        "valid": state["metrics_valid"],
+                        "received_at": state["sample_received_at"]
                     })
                     state["history"] = state["history"][-512:]
                 except: pass
@@ -1111,6 +1115,7 @@ class AxesHTTPHandler(http.server.SimpleHTTPRequestHandler):
                     "pid": None,
                     "cgroup_path": f"/sys/fs/cgroup/axes/{job_id}",
                     "pid_attached": "PENDING",
+                    "isolation_established": False,
                     "runtime_sec": 0.0,
                     "metrics": {"cpu_pct": 0.0, "memory_mb": 0.0, "pids": 0},
                     "history": [],

@@ -45,7 +45,8 @@ std::string CGroupController::resolve_writable_base_path(const std::string& defa
     fs::path primary_axes = fs::path(default_base) / "axes";
     std::error_code ec;
     
-    if (!fs::exists(primary_axes)) {
+    if (!fs::exists(primary_axes, ec)) {
+        ec.clear();
         fs::create_directories(primary_axes, ec);
     }
     
@@ -122,7 +123,7 @@ void CGroupController::ensure_parent_controllers() {
 
     // 1. Enable controllers at root level /sys/fs/cgroup/cgroup.subtree_control
     fs::path root_subtree = fs::path(base_path_) / "cgroup.subtree_control";
-    if (fs::exists(root_subtree)) {
+    if (fs::exists(root_subtree, ec)) {
         std::ofstream ofs(root_subtree);
         if (ofs.is_open()) {
             ofs << "+cpu +memory +pids" << std::endl;
@@ -132,7 +133,8 @@ void CGroupController::ensure_parent_controllers() {
 
     // 2. Enable controllers in parent directory (e.g. /sys/fs/cgroup/axes/cgroup.subtree_control)
     fs::path parent_subtree = parent_dir / "cgroup.subtree_control";
-    if (fs::exists(parent_subtree)) {
+    ec.clear();
+    if (fs::exists(parent_subtree, ec)) {
         std::ofstream ofs(parent_subtree);
         if (ofs.is_open()) {
             ofs << "+cpu +memory +pids" << std::endl;
@@ -152,13 +154,20 @@ bool CGroupController::init(double cpu_limit_pct, uint64_t memory_limit_mb, int6
         memory_limit_mb < 1 || memory_limit_mb > 1048576 || pids_limit < 1 || pids_limit > 4194304) return false;
 
     // Never reuse a directory owned by another invocation, even while it is empty.
-    if (fs::exists(cgroup_path_)) {
+    std::error_code ec;
+    bool cgroup_exists = fs::exists(cgroup_path_, ec);
+    if (ec) {
+        std::cerr << "[CGroup FATAL] Cannot inspect cgroup path '" << cgroup_path_
+                  << "': " << ec.message() << std::endl;
+        return false;
+    }
+    if (cgroup_exists) {
         std::cerr << "[CGroup FATAL] Job cgroup already exists; use a unique job ID.\n";
         return false;
     }
     ensure_parent_controllers();
 
-    std::error_code ec;
+    ec.clear();
     bool created = fs::create_directory(cgroup_path_, ec);
     if (ec || !created) {
         std::cerr << "[CGroup FATAL] Failed to create cgroup directory '" << cgroup_path_ 
@@ -202,7 +211,8 @@ bool CGroupController::init(double cpu_limit_pct, uint64_t memory_limit_mb, int6
 }
 
 bool CGroupController::add_process(pid_t pid) {
-    if (!initialized_ || !fs::exists(cgroup_path_)) {
+    std::error_code ec;
+    if (!initialized_ || !fs::exists(cgroup_path_, ec) || ec) {
         std::cerr << "[CGroup FATAL] Cannot attach PID " << pid << ": Cgroup directory does not exist: " << cgroup_path_ << std::endl;
         return false;
     }
@@ -302,10 +312,12 @@ std::string CGroupController::get_control_file(const std::string& filename) {
 void CGroupController::cleanup() {
     if (!initialized_ || cgroup_path_.empty()) return;
 
-    if (fs::exists(cgroup_path_)) {
+    std::error_code ec;
+    if (fs::exists(cgroup_path_, ec) && !ec) {
         // 1. Attempt atomic cgroup.kill (Linux kernel >= 5.14)
         fs::path kill_path = fs::path(cgroup_path_) / "cgroup.kill";
-        if (fs::exists(kill_path)) {
+        ec.clear();
+        if (fs::exists(kill_path, ec) && !ec) {
             std::ofstream kfs(kill_path);
             if (kfs.is_open()) {
                 kfs << "1" << std::endl;
@@ -382,7 +394,7 @@ EnvironmentCheckResult CGroupController::check_environment(const std::string& ba
     fs::path test_dir = fs::path(writable_base) / "axes_check_tmp";
     std::error_code ec;
     fs::create_directories(test_dir, ec);
-    if (!ec && fs::exists(test_dir)) {
+    if (!ec && fs::exists(test_dir, ec) && !ec) {
         // Test writability via access() on the created cgroup directory
         if (access(test_dir.c_str(), W_OK | X_OK) == 0) {
             res.axes_dir_writable = true;

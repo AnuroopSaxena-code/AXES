@@ -38,3 +38,6 @@ reports/*
 # Staging area for user workloads
 staging/*
 !staging/.gitkeep
+
+# Node modules
+node_modules/
